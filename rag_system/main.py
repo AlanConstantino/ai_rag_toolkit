@@ -66,6 +66,10 @@ def create_parser() -> argparse.ArgumentParser:
         '--max-pages', type=int, default=config.MAX_PAGES,
         help='Maximum pages to crawl'
     )
+    ingest_parser.add_argument(
+        '--ignore-robots', action='store_true',
+        help='Ignore robots.txt restrictions (use responsibly)'
+    )
 
     # Query command
     query_parser = subparsers.add_parser('query', help='Query the system')
@@ -262,26 +266,42 @@ class RAGSystem:
             'metrics': metrics
         }
 
-    def ingest(self, start_url: str, max_pages: int = None) -> Dict[str, Any]:
+    def ingest(self, start_url: str, max_pages: int = None,
+                ignore_robots: bool = False) -> Dict[str, Any]:
         """Ingest documentation from URL.
 
         Args:
             start_url: Starting URL to crawl.
             max_pages: Maximum pages to crawl.
+            ignore_robots: If True, ignore robots.txt restrictions.
 
         Returns:
             Ingestion statistics.
         """
         from rag_system.ingestion.indexer import Indexer
+        from urllib.parse import urlparse
 
         max_pages = max_pages or config.MAX_PAGES
+
+        # Extract domain from start URL
+        parsed = urlparse(start_url)
+        allowed_domains = config.ALLOWED_DOMAINS or [parsed.netloc]
+
         indexer = Indexer(
             self.db_path,
             vector_client=self.vector_client,
             chat_client=self.chat_client
         )
 
-        return indexer.crawl_and_index(start_url, max_pages=max_pages)
+        return indexer.crawl_and_index(
+            start_url=start_url,
+            allowed_domains=allowed_domains,
+            excluded_paths=config.EXCLUDED_PATHS,
+            included_paths=config.INCLUDED_PATHS,
+            max_pages=max_pages,
+            delay=config.CRAWL_DELAY_SECONDS,
+            ignore_robots=ignore_robots
+        )
 
     def get_stats(self) -> Dict[str, int]:
         """Get system statistics.
@@ -371,8 +391,12 @@ def main() -> None:
 
     if args.command == 'ingest':
         print(f"Ingesting from {args.url}...")
-        stats = rag.ingest(args.url, max_pages=args.max_pages)
-        print(f"Ingested {stats.get('pages', 0)} pages")
+        stats = rag.ingest(
+            args.url,
+            max_pages=args.max_pages,
+            ignore_robots=args.ignore_robots
+        )
+        print(f"Crawled {stats['pages_crawled']} pages, indexed {stats['pages_indexed']}, skipped {stats['pages_skipped']}, errors: {stats['errors']}")
 
     elif args.command == 'query':
         result = rag.query(args.question, top_k=args.top_k)

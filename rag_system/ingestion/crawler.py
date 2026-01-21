@@ -11,6 +11,10 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from typing import Dict, Generator, List, Optional, Set
+import hashlib
+import os
+import json
+from pathlib import Path
 
 from rag_system.utils import get_logger
 
@@ -21,11 +25,14 @@ logger = get_logger(__name__)
 # URL Utilities
 # =============================================================================
 
-def normalize_url(url: str) -> str:
-    """Normalize a URL by removing fragments and trailing slashes.
+def normalize_url(url: str, preserve_trailing_slash: bool = False) -> str:
+    """Normalize a URL by removing fragments.
 
     Args:
         url: URL to normalize.
+        preserve_trailing_slash: If True, keep trailing slashes for directory-like
+            paths (paths without file extensions). This is important for correct
+            relative URL resolution.
 
     Returns:
         Normalized URL.
@@ -35,9 +42,19 @@ def normalize_url(url: str) -> str:
     normalized = parsed._replace(fragment='')
     # Rebuild URL
     result = urllib.parse.urlunparse(normalized)
-    # Remove trailing slash (except for root)
+
+    # Handle trailing slash
     if result.endswith('/') and parsed.path != '/':
-        result = result.rstrip('/')
+        if preserve_trailing_slash:
+            # Keep trailing slash for directory-like paths (no file extension)
+            path = parsed.path.rstrip('/')
+            has_extension = '.' in path.split('/')[-1] if path else False
+            if has_extension:
+                result = result.rstrip('/')
+            # else: keep the trailing slash for directories
+        else:
+            result = result.rstrip('/')
+
     return result
 
 
@@ -72,12 +89,75 @@ def is_excluded_path(url: str, excluded_paths: List[str]) -> bool:
     return False
 
 
+def is_included_path(url: str, included_paths: Optional[List[str]]) -> bool:
+    """Check if a URL path matches any included path prefix.
+
+    Args:
+        url: URL to check.
+        included_paths: List of path prefixes to include. If None, returns True.
+
+    Returns:
+        True if included_paths is None OR URL path starts with any included prefix.
+    """
+    if included_paths is None:
+        return True
+
+    parsed = urllib.parse.urlparse(url)
+    for included in included_paths:
+        if parsed.path.startswith(included):
+            return True
+    return False
+
+
+def _ensure_directory_slash(url: str) -> str:
+    """Ensure directory-like URLs have a trailing slash for proper relative resolution.
+
+    Args:
+        url: URL to check.
+
+    Returns:
+        URL with trailing slash added if it looks like a directory.
+    """
+    # Common web file extensions
+    FILE_EXTENSIONS = {
+        'html', 'htm', 'php', 'asp', 'aspx', 'jsp', 'cgi',
+        'xml', 'json', 'txt', 'css', 'js',
+        'pdf', 'doc', 'docx', 'xls', 'xlsx',
+        'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico',
+        'zip', 'tar', 'gz', 'rar',
+        'mp3', 'mp4', 'wav', 'avi',
+    }
+
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path
+
+    # If path is empty or root, return as-is
+    if not path or path == '/':
+        return url
+
+    # Check if path looks like a file (has known web file extension)
+    last_segment = path.rstrip('/').split('/')[-1]
+    has_file_extension = False
+    if '.' in last_segment:
+        ext = last_segment.rsplit('.', 1)[-1].lower()
+        has_file_extension = ext in FILE_EXTENSIONS
+
+    # If it's a directory-like path without trailing slash, add one
+    if not has_file_extension and not path.endswith('/'):
+        new_path = path + '/'
+        parsed = parsed._replace(path=new_path)
+        return urllib.parse.urlunparse(parsed)
+
+    return url
+
+
 class LinkExtractor(HTMLParser):
     """HTML parser to extract links from anchor tags."""
 
     def __init__(self, base_url: str):
         super().__init__()
-        self.base_url = base_url
+        # Ensure base URL has trailing slash for directories for proper relative resolution
+        self.base_url = _ensure_directory_slash(base_url)
         self.links: List[str] = []
 
     def handle_starttag(self, tag: str, attrs: List[tuple]) -> None:
@@ -89,7 +169,7 @@ class LinkExtractor(HTMLParser):
                         continue
                     # Resolve relative URLs
                     absolute_url = urllib.parse.urljoin(self.base_url, value)
-                    # Normalize
+                    # Normalize (don't strip trailing slash for dedup purposes)
                     normalized = normalize_url(absolute_url)
                     self.links.append(normalized)
 
@@ -99,7 +179,8 @@ def extract_links(html: str, base_url: str) -> List[str]:
 
     Args:
         html: HTML content.
-        base_url: Base URL for resolving relative links.
+        base_url: Base URL for resolving relative links. Directory-like URLs
+            will automatically get a trailing slash for correct resolution.
 
     Returns:
         List of absolute URLs found in the HTML.
@@ -214,21 +295,40 @@ class Crawler:
 
     def __init__(self, start_url: str, allowed_domains: List[str],
                  excluded_paths: Optional[List[str]] = None,
-                 max_pages: int = 1000, delay: float = 1.0):
+                 included_paths: Optional[List[str]] = None,
+                 max_pages: int = 1000, delay: float = 1.0,
+                 cache_dir: Optional[str] = None,
+                 ignore_robots: bool = False):
         """Initialize the crawler.
 
         Args:
             start_url: Starting URL to crawl.
             allowed_domains: List of domains to stay within.
             excluded_paths: List of path prefixes to exclude.
+            included_paths: List of path prefixes to include. If set, only URLs
+                          whose path starts with one of these prefixes will be crawled.
+                          If None, all paths are included (unless excluded).
             max_pages: Maximum number of pages to crawl.
             delay: Delay between requests in seconds.
+            cache_dir: Optional directory for HTTP response caching.
+                      If None, caching is disabled.
+            ignore_robots: If True, ignore robots.txt restrictions.
         """
         self.start_url = normalize_url(start_url)
         self.allowed_domains = allowed_domains
         self.excluded_paths = excluded_paths or []
+        self.included_paths = included_paths
         self.max_pages = max_pages
         self.delay = delay
+        self.cache_dir = cache_dir
+        self.ignore_robots = ignore_robots
+
+        if self.cache_dir:
+            Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
+            logger.info(f"HTTP cache enabled: {self.cache_dir}")
+
+        if self.ignore_robots:
+            logger.info("Ignoring robots.txt restrictions")
 
         self.visited: Set[str] = set()
         self.queue: List[str] = [self.start_url]
@@ -253,8 +353,22 @@ class Crawler:
         except Exception:
             return None
 
+    def _get_cache_path(self, url: str) -> str:
+        """Get cache file path for a URL.
+
+        Args:
+            url: URL to get cache path for.
+
+        Returns:
+            Path to cache file.
+        """
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        return os.path.join(self.cache_dir, f"{url_hash}.json")
+
     def _fetch_url(self, url: str) -> tuple:
         """Fetch a URL and return its content.
+
+        Checks cache first if caching is enabled.
 
         Args:
             url: URL to fetch.
@@ -265,6 +379,16 @@ class Crawler:
         Raises:
             urllib.error.HTTPError: If the request fails.
         """
+        # Check cache first
+        if self.cache_dir:
+            cache_path = self._get_cache_path(url)
+            if os.path.exists(cache_path):
+                logger.info(f"Cache hit: {url}")
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cached = json.load(f)
+                    return cached['content'], cached['status']
+
+        # Fetch from network
         request = urllib.request.Request(
             url,
             headers={
@@ -274,7 +398,16 @@ class Crawler:
         )
         with urllib.request.urlopen(request, timeout=30) as response:
             content = response.read().decode('utf-8', errors='ignore')
-            return content, response.status
+            status = response.status
+
+        # Cache the response
+        if self.cache_dir:
+            cache_path = self._get_cache_path(url)
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump({'url': url, 'content': content, 'status': status}, f)
+            logger.info(f"Cached: {url}")
+
+        return content, status
 
     def _is_html_content(self, url: str) -> bool:
         """Check if URL likely points to HTML content.
@@ -324,6 +457,10 @@ class Crawler:
         if is_excluded_path(url, self.excluded_paths):
             return False
 
+        # Included path?
+        if not is_included_path(url, self.included_paths):
+            return False
+
         # HTML content?
         if not self._is_html_content(url):
             return False
@@ -342,13 +479,14 @@ class Crawler:
         Yields:
             Dict with 'url', 'html', and 'status_code' for each page.
         """
-        # Fetch robots.txt first
-        robots_txt = self._fetch_robots_txt()
-        self.robots_parser = RobotsParser(self.start_url, robots_txt)
+        # Fetch robots.txt first (unless ignoring)
+        if not self.ignore_robots:
+            robots_txt = self._fetch_robots_txt()
+            self.robots_parser = RobotsParser(self.start_url, robots_txt)
 
-        # Use crawl delay from robots.txt if specified
-        if self.robots_parser.get_crawl_delay():
-            self.delay = max(self.delay, self.robots_parser.get_crawl_delay())
+            # Use crawl delay from robots.txt if specified
+            if self.robots_parser.get_crawl_delay():
+                self.delay = max(self.delay, self.robots_parser.get_crawl_delay())
 
         pages_crawled = 0
 
