@@ -200,6 +200,46 @@ class TestCrawlAndIndex(unittest.TestCase):
         self.assertEqual(len(all_pages), 2)
         self.assertEqual(stats['pages_indexed'], 2)
 
+    def test_bm25_index_built_after_crawl(self):
+        """crawl_and_index should build BM25 index after indexing pages."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.ingestion.crawler import Crawler
+        from rag_system.database import get_connection
+
+        mock_pages = [
+            {'url': 'https://example.com/', 'html': '<html><body>Home page content</body></html>', 'status_code': 200},
+            {'url': 'https://example.com/about', 'html': '<html><body>About page content</body></html>', 'status_code': 200},
+        ]
+
+        indexer = Indexer(self.temp_path)
+
+        with patch.object(Crawler, 'crawl', return_value=iter(mock_pages)):
+            stats = indexer.crawl_and_index(
+                start_url='https://example.com',
+                allowed_domains=['example.com'],
+                max_pages=10
+            )
+
+        # Verify BM25 index tables are populated
+        conn = get_connection(self.temp_path)
+
+        # Check doc_terms table
+        cursor = conn.execute("SELECT COUNT(*) as count FROM doc_terms")
+        doc_terms_count = cursor.fetchone()['count']
+        self.assertGreater(doc_terms_count, 0, "doc_terms table should have entries")
+
+        # Check corpus_stats table
+        cursor = conn.execute("SELECT COUNT(*) as count FROM corpus_stats")
+        corpus_stats_count = cursor.fetchone()['count']
+        self.assertEqual(corpus_stats_count, 1, "corpus_stats should have one row")
+
+        # Check term_doc_frequencies table
+        cursor = conn.execute("SELECT COUNT(*) as count FROM term_doc_frequencies")
+        term_freq_count = cursor.fetchone()['count']
+        self.assertGreater(term_freq_count, 0, "term_doc_frequencies should have unique terms")
+
+        conn.close()
+
 
 class TestIndexStats(unittest.TestCase):
     """Test index statistics functionality."""

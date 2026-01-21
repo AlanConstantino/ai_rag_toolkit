@@ -81,6 +81,38 @@ class TestRAGSystem(unittest.TestCase):
         self.assertEqual(stats['pages'], 1)
         self.assertEqual(stats['chunks'], 1)
 
+    def test_ingest_with_mocked_crawler(self):
+        """ingest should call crawl_and_index with correct parameters."""
+        from rag_system.main import RAGSystem
+        from rag_system.ingestion.indexer import Indexer
+
+        rag = RAGSystem(db_path=self.temp_path)
+
+        # Mock crawl_and_index to verify it's called correctly
+        with patch.object(Indexer, 'crawl_and_index') as mock_crawl:
+            mock_crawl.return_value = {
+                'pages_crawled': 5,
+                'pages_indexed': 4,
+                'pages_skipped': 1,
+                'errors': 0
+            }
+
+            stats = rag.ingest('https://docs.python.org/3.6/', max_pages=5)
+
+            # Verify crawl_and_index was called
+            self.assertTrue(mock_crawl.called)
+
+            # Verify parameters passed correctly
+            call_args = mock_crawl.call_args
+            self.assertEqual(call_args[1]['start_url'], 'https://docs.python.org/3.6/')
+            self.assertIn('allowed_domains', call_args[1])
+            self.assertEqual(call_args[1]['allowed_domains'], ['docs.python.org'])
+            self.assertEqual(call_args[1]['max_pages'], 5)
+
+            # Verify stats returned
+            self.assertEqual(stats['pages_crawled'], 5)
+            self.assertEqual(stats['pages_indexed'], 4)
+
 
 class TestCLICommands(unittest.TestCase):
     """Test CLI command handling."""
@@ -172,6 +204,39 @@ class TestResultFormatting(unittest.TestCase):
         self.assertIn('10', formatted)
         self.assertIn('100', formatted)
         self.assertIn('50', formatted)
+
+
+class TestIngestOutput(unittest.TestCase):
+    """Test ingestion output formatting."""
+
+    def test_stats_printed_correctly(self):
+        """main() should print correct stats after ingestion."""
+        from rag_system.main import main
+        import sys
+        from io import StringIO
+
+        # Mock sys.argv for CLI
+        test_args = ['rag_system', 'ingest', 'https://example.com', '--max-pages', '5']
+
+        # Mock RAGSystem.ingest to return stats
+        mock_stats = {
+            'pages_crawled': 10,
+            'pages_indexed': 8,
+            'pages_skipped': 2,
+            'errors': 0
+        }
+
+        with patch('sys.argv', test_args), \
+             patch('rag_system.main.RAGSystem.ingest', return_value=mock_stats), \
+             patch('sys.stdout', new=StringIO()) as fake_out:
+
+            main()
+            output = fake_out.getvalue()
+
+            # Verify output contains correct numbers
+            self.assertIn('Crawled 10 pages', output)  # pages_crawled
+            self.assertIn('indexed 8', output)   # pages_indexed
+            self.assertNotIn('Ingested 0 pages', output)  # Bug 2 check - old buggy format
 
 
 if __name__ == '__main__':

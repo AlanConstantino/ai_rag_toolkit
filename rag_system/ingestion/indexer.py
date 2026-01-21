@@ -14,7 +14,8 @@ from rag_system.database import (
 )
 from rag_system.ingestion.crawler import Crawler
 from rag_system.ingestion.parser import parse_html, extract_title
-from rag_system.ingestion.chunker import chunk_document
+from rag_system.ingestion.chunker import chunk_markdown
+from rag_system.ingestion.html_to_markdown import html_to_markdown
 from rag_system.utils import hash_content, get_logger
 
 logger = get_logger(__name__)
@@ -63,8 +64,13 @@ class Indexer:
                 logger.info(f"Page exists, skipping: {url}")
                 return existing['id']
 
-            # Parse HTML
+            # Parse HTML for title and basic text
             parsed = parse_html(html, remove_nav=True, remove_footer=True)
+
+            # Convert HTML to Markdown for chunking (Markdown-first approach)
+            # This naturally filters out nav/sidebar/footer as they don't convert
+            # to meaningful Markdown structure
+            markdown = html_to_markdown(html)
 
             # Generate content hash
             content_hash = hash_content(html)
@@ -75,16 +81,15 @@ class Indexer:
                 url=url,
                 title=parsed['title'] or extract_title(html),
                 raw_html=html,
-                parsed_text=parsed['text'],
+                parsed_text=markdown,  # Store markdown instead of parsed text
                 content_hash=content_hash
             )
 
             logger.info(f"Indexed page: {url} (id={page_id})")
 
-            # Create chunks
-            chunk_result = chunk_document(
-                text=parsed['text'],
-                headings=parsed['headings'],
+            # Create chunks from Markdown (heading structure is unambiguous in MD)
+            chunk_result = chunk_markdown(
+                markdown=markdown,
                 small_chunk_size=config.SMALL_CHUNK_SIZE,
                 large_chunk_size=config.LARGE_CHUNK_SIZE,
                 overlap=config.CHUNK_OVERLAP
