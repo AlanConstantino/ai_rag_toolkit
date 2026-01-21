@@ -63,6 +63,10 @@ ALLOWED_DOMAINS = [d.strip() for d in _allowed_domains.split(',') if d.strip()] 
 _excluded_paths = os.environ.get('RAG_EXCLUDED_PATHS', '/api/,/static/')
 EXCLUDED_PATHS = [p.strip() for p in _excluded_paths.split(',') if p.strip()]
 
+# Parse INCLUDED_PATHS from comma-separated string
+_included_paths = os.environ.get('RAG_INCLUDED_PATHS', '')
+INCLUDED_PATHS = [p.strip() for p in _included_paths.split(',') if p.strip()] if _included_paths else None
+
 # =============================================================================
 # Chunking Settings
 # =============================================================================
