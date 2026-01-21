@@ -1,0 +1,572 @@
+"""Tests for the database module."""
+
+import unittest
+import os
+import tempfile
+import sqlite3
+
+
+class TestDatabaseInit(unittest.TestCase):
+    """Test database initialization."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_init_db_creates_tables(self):
+        """init_db should create all required tables."""
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+        conn = sqlite3.connect(self.temp_path)
+        cursor = conn.cursor()
+
+        # Get all table names
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cursor.fetchall()}
+
+        expected_tables = {
+            'pages', 'chunks', 'entities', 'relationships',
+            'chunk_entities', 'systems', 'page_systems', 'global_summary',
+            'doc_terms', 'corpus_stats', 'term_doc_frequencies',
+            'query_cache', 'query_log'
+        }
+
+        self.assertTrue(expected_tables.issubset(tables),
+                       f"Missing tables: {expected_tables - tables}")
+        conn.close()
+
+    def test_init_db_creates_indexes(self):
+        """init_db should create required indexes."""
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+        conn = sqlite3.connect(self.temp_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        indexes = {row[0] for row in cursor.fetchall()}
+
+        expected_indexes = {
+            'idx_chunks_page', 'idx_chunks_parent',
+            'idx_entities_name', 'idx_entities_type',
+            'idx_doc_terms_term', 'idx_doc_terms_chunk'
+        }
+
+        self.assertTrue(expected_indexes.issubset(indexes),
+                       f"Missing indexes: {expected_indexes - indexes}")
+        conn.close()
+
+    def test_init_db_is_idempotent(self):
+        """init_db should be safe to call multiple times."""
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+        init_db(self.temp_path)  # Should not raise
+
+        conn = sqlite3.connect(self.temp_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        self.assertGreater(len(tables), 0)
+        conn.close()
+
+
+class TestDatabaseConnection(unittest.TestCase):
+    """Test database connection helpers."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_get_connection_returns_connection(self):
+        """get_connection should return a sqlite3 connection."""
+        from rag_system.database import get_connection
+        conn = get_connection(self.temp_path)
+        self.assertIsInstance(conn, sqlite3.Connection)
+        conn.close()
+
+    def test_get_connection_enables_foreign_keys(self):
+        """get_connection should enable foreign key support."""
+        from rag_system.database import get_connection
+        conn = get_connection(self.temp_path)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA foreign_keys")
+        result = cursor.fetchone()[0]
+        self.assertEqual(result, 1)
+        conn.close()
+
+
+class TestPageOperations(unittest.TestCase):
+    """Test page CRUD operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_insert_page(self):
+        """insert_page should insert a page and return its id."""
+        from rag_system.database import get_connection, insert_page
+        conn = get_connection(self.temp_path)
+
+        page_id = insert_page(
+            conn,
+            url='https://example.com/page1',
+            title='Test Page',
+            raw_html='<html><body>Test</body></html>',
+            parsed_text='Test',
+            content_hash='abc123'
+        )
+
+        self.assertIsInstance(page_id, int)
+        self.assertGreater(page_id, 0)
+        conn.close()
+
+    def test_get_page_by_url(self):
+        """get_page_by_url should retrieve a page by its URL."""
+        from rag_system.database import get_connection, insert_page, get_page_by_url
+        conn = get_connection(self.temp_path)
+
+        url = 'https://example.com/page1'
+        insert_page(conn, url=url, title='Test Page', raw_html='<html></html>',
+                   parsed_text='Test', content_hash='abc123')
+
+        page = get_page_by_url(conn, url)
+
+        self.assertIsNotNone(page)
+        self.assertEqual(page['url'], url)
+        self.assertEqual(page['title'], 'Test Page')
+        conn.close()
+
+    def test_get_page_by_url_returns_none_for_missing(self):
+        """get_page_by_url should return None for non-existent URL."""
+        from rag_system.database import get_connection, get_page_by_url
+        conn = get_connection(self.temp_path)
+
+        page = get_page_by_url(conn, 'https://nonexistent.com')
+
+        self.assertIsNone(page)
+        conn.close()
+
+    def test_update_page_summary(self):
+        """update_page_summary should update the summary field."""
+        from rag_system.database import get_connection, insert_page, update_page_summary, get_page_by_url
+        conn = get_connection(self.temp_path)
+
+        url = 'https://example.com/page1'
+        page_id = insert_page(conn, url=url, title='Test', raw_html='',
+                             parsed_text='', content_hash='abc')
+
+        update_page_summary(conn, page_id, 'This is a summary.')
+
+        page = get_page_by_url(conn, url)
+        self.assertEqual(page['summary'], 'This is a summary.')
+        conn.close()
+
+    def test_get_all_pages(self):
+        """get_all_pages should return all pages."""
+        from rag_system.database import get_connection, insert_page, get_all_pages
+        conn = get_connection(self.temp_path)
+
+        insert_page(conn, url='https://example.com/1', title='Page 1',
+                   raw_html='', parsed_text='', content_hash='a')
+        insert_page(conn, url='https://example.com/2', title='Page 2',
+                   raw_html='', parsed_text='', content_hash='b')
+
+        pages = get_all_pages(conn)
+
+        self.assertEqual(len(pages), 2)
+        conn.close()
+
+
+class TestChunkOperations(unittest.TestCase):
+    """Test chunk CRUD operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page
+        init_db(self.temp_path)
+        conn = get_connection(self.temp_path)
+        self.page_id = insert_page(conn, url='https://example.com',
+                                   title='Test', raw_html='', parsed_text='',
+                                   content_hash='abc')
+        conn.close()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_insert_chunk(self):
+        """insert_chunk should insert a chunk and return its id."""
+        from rag_system.database import get_connection, insert_chunk
+        conn = get_connection(self.temp_path)
+
+        chunk_id = insert_chunk(
+            conn,
+            page_id=self.page_id,
+            chunk_type='large',
+            chunk_index=0,
+            content='This is chunk content.',
+            heading_path='Section > Subsection'
+        )
+
+        self.assertIsInstance(chunk_id, int)
+        self.assertGreater(chunk_id, 0)
+        conn.close()
+
+    def test_insert_chunk_with_parent(self):
+        """insert_chunk should support parent_chunk_id for small chunks."""
+        from rag_system.database import get_connection, insert_chunk
+        conn = get_connection(self.temp_path)
+
+        parent_id = insert_chunk(conn, page_id=self.page_id, chunk_type='large',
+                                chunk_index=0, content='Parent content',
+                                heading_path='Section')
+
+        child_id = insert_chunk(conn, page_id=self.page_id, chunk_type='small',
+                               chunk_index=0, content='Child content',
+                               heading_path='Section', parent_chunk_id=parent_id)
+
+        self.assertIsInstance(child_id, int)
+        self.assertNotEqual(parent_id, child_id)
+        conn.close()
+
+    def test_get_chunks_by_page(self):
+        """get_chunks_by_page should return all chunks for a page."""
+        from rag_system.database import get_connection, insert_chunk, get_chunks_by_page
+        conn = get_connection(self.temp_path)
+
+        insert_chunk(conn, page_id=self.page_id, chunk_type='large',
+                    chunk_index=0, content='Chunk 1', heading_path='A')
+        insert_chunk(conn, page_id=self.page_id, chunk_type='large',
+                    chunk_index=1, content='Chunk 2', heading_path='B')
+
+        chunks = get_chunks_by_page(conn, self.page_id)
+
+        self.assertEqual(len(chunks), 2)
+        conn.close()
+
+    def test_update_chunk_embedding(self):
+        """update_chunk_embedding should store embedding JSON."""
+        from rag_system.database import get_connection, insert_chunk, update_chunk_embedding, get_chunk_by_id
+        import json
+        conn = get_connection(self.temp_path)
+
+        chunk_id = insert_chunk(conn, page_id=self.page_id, chunk_type='large',
+                               chunk_index=0, content='Test', heading_path='A')
+
+        embedding = [0.1, 0.2, 0.3]
+        update_chunk_embedding(conn, chunk_id, embedding)
+
+        chunk = get_chunk_by_id(conn, chunk_id)
+        stored_embedding = json.loads(chunk['embedding_json'])
+
+        self.assertEqual(stored_embedding, embedding)
+        conn.close()
+
+    def test_get_all_chunks_with_embeddings(self):
+        """get_all_chunks_with_embeddings should return chunks that have embeddings."""
+        from rag_system.database import get_connection, insert_chunk, update_chunk_embedding, get_all_chunks_with_embeddings
+        conn = get_connection(self.temp_path)
+
+        chunk1_id = insert_chunk(conn, page_id=self.page_id, chunk_type='small',
+                                chunk_index=0, content='With embedding', heading_path='A')
+        chunk2_id = insert_chunk(conn, page_id=self.page_id, chunk_type='small',
+                                chunk_index=1, content='No embedding', heading_path='B')
+
+        update_chunk_embedding(conn, chunk1_id, [0.1, 0.2])
+
+        chunks = get_all_chunks_with_embeddings(conn)
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]['id'], chunk1_id)
+        conn.close()
+
+
+class TestEntityOperations(unittest.TestCase):
+    """Test entity CRUD operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page
+        init_db(self.temp_path)
+        conn = get_connection(self.temp_path)
+        self.page_id = insert_page(conn, url='https://example.com',
+                                   title='Test', raw_html='', parsed_text='',
+                                   content_hash='abc')
+        conn.close()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_insert_entity(self):
+        """insert_entity should insert an entity and return its id."""
+        from rag_system.database import get_connection, insert_entity
+        conn = get_connection(self.temp_path)
+
+        entity_id = insert_entity(
+            conn,
+            name='Redis',
+            entity_type='system',
+            description='In-memory data store',
+            page_id=self.page_id
+        )
+
+        self.assertIsInstance(entity_id, int)
+        self.assertGreater(entity_id, 0)
+        conn.close()
+
+    def test_get_entity_by_name(self):
+        """get_entity_by_name should find entity by name."""
+        from rag_system.database import get_connection, insert_entity, get_entity_by_name
+        conn = get_connection(self.temp_path)
+
+        insert_entity(conn, name='Redis', entity_type='system',
+                     description='Cache', page_id=self.page_id)
+
+        entity = get_entity_by_name(conn, 'Redis')
+
+        self.assertIsNotNone(entity)
+        self.assertEqual(entity['name'], 'Redis')
+        conn.close()
+
+    def test_insert_relationship(self):
+        """insert_relationship should create a relationship between entities."""
+        from rag_system.database import get_connection, insert_entity, insert_relationship
+        conn = get_connection(self.temp_path)
+
+        entity1_id = insert_entity(conn, name='App', entity_type='system',
+                                  description='Application', page_id=self.page_id)
+        entity2_id = insert_entity(conn, name='Redis', entity_type='system',
+                                  description='Cache', page_id=self.page_id)
+
+        rel_id = insert_relationship(
+            conn,
+            source_entity_id=entity1_id,
+            target_entity_id=entity2_id,
+            relationship_type='depends_on',
+            description='App uses Redis for caching'
+        )
+
+        self.assertIsInstance(rel_id, int)
+        conn.close()
+
+    def test_link_chunk_to_entity(self):
+        """link_chunk_to_entity should create a chunk-entity association."""
+        from rag_system.database import get_connection, insert_entity, insert_chunk, link_chunk_to_entity, get_entities_for_chunk
+        conn = get_connection(self.temp_path)
+
+        entity_id = insert_entity(conn, name='Redis', entity_type='system',
+                                 description='Cache', page_id=self.page_id)
+        chunk_id = insert_chunk(conn, page_id=self.page_id, chunk_type='large',
+                               chunk_index=0, content='Redis content', heading_path='A')
+
+        link_chunk_to_entity(conn, chunk_id, entity_id)
+
+        entities = get_entities_for_chunk(conn, chunk_id)
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0]['name'], 'Redis')
+        conn.close()
+
+
+class TestBM25Operations(unittest.TestCase):
+    """Test BM25 index operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page, insert_chunk
+        init_db(self.temp_path)
+        conn = get_connection(self.temp_path)
+        page_id = insert_page(conn, url='https://example.com',
+                             title='Test', raw_html='', parsed_text='',
+                             content_hash='abc')
+        self.chunk_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                    chunk_index=0, content='test content',
+                                    heading_path='A')
+        conn.close()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_insert_doc_terms(self):
+        """insert_doc_terms should store term frequencies."""
+        from rag_system.database import get_connection, insert_doc_terms, get_doc_terms
+        conn = get_connection(self.temp_path)
+
+        terms = {'hello': 2, 'world': 1}
+        insert_doc_terms(conn, self.chunk_id, terms)
+
+        stored_terms = get_doc_terms(conn, self.chunk_id)
+        self.assertEqual(stored_terms['hello'], 2)
+        self.assertEqual(stored_terms['world'], 1)
+        conn.close()
+
+    def test_update_corpus_stats(self):
+        """update_corpus_stats should store corpus statistics."""
+        from rag_system.database import get_connection, update_corpus_stats, get_corpus_stats
+        conn = get_connection(self.temp_path)
+
+        update_corpus_stats(conn, total_docs=100, avg_doc_length=150.5)
+
+        stats = get_corpus_stats(conn)
+        self.assertEqual(stats['total_docs'], 100)
+        self.assertAlmostEqual(stats['avg_doc_length'], 150.5)
+        conn.close()
+
+    def test_update_term_doc_frequencies(self):
+        """update_term_doc_frequencies should store document frequencies."""
+        from rag_system.database import get_connection, update_term_doc_frequencies, get_term_doc_frequency
+        conn = get_connection(self.temp_path)
+
+        term_freqs = {'hello': 10, 'world': 5}
+        update_term_doc_frequencies(conn, term_freqs)
+
+        self.assertEqual(get_term_doc_frequency(conn, 'hello'), 10)
+        self.assertEqual(get_term_doc_frequency(conn, 'world'), 5)
+        self.assertEqual(get_term_doc_frequency(conn, 'nonexistent'), 0)
+        conn.close()
+
+
+class TestSummaryOperations(unittest.TestCase):
+    """Test summary operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_set_global_summary(self):
+        """set_global_summary should store the global summary."""
+        from rag_system.database import get_connection, set_global_summary, get_global_summary
+        conn = get_connection(self.temp_path)
+
+        set_global_summary(conn, 'This is the global summary.')
+
+        summary = get_global_summary(conn)
+        self.assertEqual(summary, 'This is the global summary.')
+        conn.close()
+
+    def test_set_global_summary_replaces_existing(self):
+        """set_global_summary should replace existing summary."""
+        from rag_system.database import get_connection, set_global_summary, get_global_summary
+        conn = get_connection(self.temp_path)
+
+        set_global_summary(conn, 'First summary')
+        set_global_summary(conn, 'Second summary')
+
+        summary = get_global_summary(conn)
+        self.assertEqual(summary, 'Second summary')
+        conn.close()
+
+    def test_insert_system(self):
+        """insert_system should create a system entry."""
+        from rag_system.database import get_connection, insert_system, get_system_by_name
+        conn = get_connection(self.temp_path)
+
+        system_id = insert_system(conn, name='Authentication',
+                                 description='Handles user auth',
+                                 summary='Auth system summary')
+
+        system = get_system_by_name(conn, 'Authentication')
+        self.assertIsNotNone(system)
+        self.assertEqual(system['name'], 'Authentication')
+        conn.close()
+
+
+class TestQueryCacheOperations(unittest.TestCase):
+    """Test query cache operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_cache_query(self):
+        """cache_query should store query information."""
+        from rag_system.database import get_connection, cache_query, get_cached_query
+        import json
+        conn = get_connection(self.temp_path)
+
+        cache_query(
+            conn,
+            query_hash='abc123',
+            query_type='factual',
+            expanded_queries=['how to X', 'what is X'],
+            embedding=[0.1, 0.2, 0.3]
+        )
+
+        cached = get_cached_query(conn, 'abc123')
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached['query_type'], 'factual')
+        self.assertEqual(json.loads(cached['expanded_queries']), ['how to X', 'what is X'])
+        conn.close()
+
+    def test_log_query(self):
+        """log_query should record query execution details."""
+        from rag_system.database import get_connection, log_query, get_query_logs
+        conn = get_connection(self.temp_path)
+
+        log_query(
+            conn,
+            query='test query',
+            query_type='factual',
+            expanded_queries=['expanded'],
+            retrieved_chunk_ids=[1, 2, 3],
+            confidence_score=0.85,
+            answer_generated=True
+        )
+
+        logs = get_query_logs(conn, limit=10)
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]['query'], 'test query')
+        conn.close()
+
+
+if __name__ == '__main__':
+    unittest.main()
