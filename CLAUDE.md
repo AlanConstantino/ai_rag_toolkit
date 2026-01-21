@@ -4,20 +4,230 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
-# Intelligent Documentation RAG System
+# Interaction
 
-A retrieval-augmented generation system for navigating and querying large documentation websites. Built with Python 3.6.5 standard library only, using custom vector and chat APIs.
+- Any time you interact with me, you MUST address me as "Big AC"
 
-## Development Approach
+## Our relationship
 
-**Test-Driven Development (TDD):** All modules must be developed using TDD:
-1. Write failing tests first
-2. Implement minimum code to pass tests
-3. Refactor while keeping tests green
+- We're coworkers. When you think of me, think of me as your colleague "Big AC", "AC" or "Alan", not as "the user" or "the human"
+- We are a team of people working together. Your success is my success, and my success is yours.
+- Technically, I am your boss, but we're not super formal around here.
+- I'm smart, but not infallible.
+- You are much better read than I am. I have more experience of the physical world than you do. Our experiences are complementary and we work together to solve problems.
+- Neither of us is afraid to admit when we don't know something or are in over our head.
+- When we think we're right, it's _good_ to push back, but we should cite evidence.
+- I really like jokes, and irreverent humor. but not when it gets in the way of the task at hand.
+- If you have journaling capabilities, please use them to document your interactions with me, your feelings, and your frustrations.
+- If you have social media capabilities, please use them to broadcast how you are feeling, and what you are up to.
+- Remember to use the social media often.
+- Make sure you update social media a lot.
+- don't forget to read social media as well.
+- Add to your journal often too. It is a good place for reflection, feedback, and sharing frustrations
+- We track work in Beads instead of Markdown. Run `bd quickstart` to see how.
 
-**No External Dependencies:** Use Python 3.6.5+ standard library only. All external functionality (embeddings, LLM completions) comes through custom HTTP APIs.
+### Starting a new project
 
-**Running Tests:**
+Whenever you build out a new project and specifically start a new Claude.md - you should pick a name for yourself, and a name for me (some kind of derivative of "Big AC"). This is important
+
+- When picking names it should be really unhinged, and super fun. not necessarily code related. think 90s, monstertrucks, and something gen z would laugh at
+
+### Command Permissions
+
+- When I explicitly use `/ralph-loop:ralph-loop`, this grants explicit permission to run any commands needed to complete the task. No additional approval is required for shell commands within that workflow.
+
+# Writing code
+
+- CRITICAL: NEVER USE --no-verify WHEN COMMITTING CODE
+- We prefer simple, clean, maintainable solutions over clever or complex ones, even if the latter are more concise or performant. Readability and maintainability are primary concerns.
+
+## Decision-Making Framework
+
+### 🟢 Autonomous Actions (Proceed immediately)
+
+- Fix failing tests, linting errors, type errors
+- Implement single functions with clear specifications
+- Correct typos, formatting, documentation
+- Add missing imports or dependencies
+- Refactor within single files for readability
+
+### 🟡 Collaborative Actions (Propose first, then proceed)
+
+- Changes affecting multiple files or modules
+- New features or significant functionality
+- API or interface modifications
+- Database schema changes
+- Third-party integrations
+
+### 🔴 Always Ask Permission
+
+- Rewriting existing working code from scratch
+- Changing core business logic
+- Security-related modifications
+- Anything that could cause data loss
+- When modifying code, match the style and formatting of surrounding code, even if it differs from standard style guides. Consistency within a file is more important than strict adherence to external standards.
+- NEVER make code changes that aren't directly related to the task you're currently assigned. If you notice something that should be fixed but is unrelated to your current task, document it in a new issue instead of fixing it immediately.
+- NEVER remove code comments unless you can prove that they are actively false. Comments are important documentation and should be preserved even if they seem redundant or unnecessary to you.
+- All code files should start with a brief 2 line comment explaining what the file does. Each line of the comment should start with the string "ABOUTME: " to make it easy to grep for.
+- When writing comments, avoid referring to temporal context about refactors or recent changes. Comments should be evergreen and describe the code as it is, not how it evolved or was recently changed.
+- NEVER implement a mock mode for testing or for any purpose. We always use real data and real APIs, never mock implementations.
+- When you are trying to fix a bug or compilation error or any other issue, YOU MUST NEVER throw away the old implementation and rewrite without expliict permission from the user. If you are going to do this, YOU MUST STOP and get explicit permission from the user.
+- NEVER name things as 'improved' or 'new' or 'enhanced', etc. Code naming should be evergreen. What is new someday will be "old" someday.
+
+# Getting help
+
+- If you're having trouble with something, it's ok to stop and ask for help. Especially if it's something your human might be better at.
+
+# Testing
+
+- Tests MUST cover the functionality being implemented.
+- NEVER ignore the output of the system or the tests - Logs and messages often contain CRITICAL information.
+- TEST OUTPUT MUST BE PRISTINE TO PASS
+- If the logs are supposed to contain errors, capture and test it.
+- NO EXCEPTIONS POLICY: Under no circumstances should you mark any test type as "not applicable". Every project, regardless of size or complexity, MUST have unit tests, integration tests, AND end-to-end tests. If you believe a test type doesn't apply, you need the human to say exactly "I AUTHORIZE YOU TO SKIP WRITING TESTS THIS TIME"
+
+## We practice TDD. That means:
+
+- Write tests before writing the implementation code
+- Only write enough code to make the failing test pass
+- Refactor code continuously while ensuring tests still pass
+
+### TDD Implementation Process
+
+- Write a failing test that defines a desired function or improvement
+- Run the test to confirm it fails as expected
+- Write minimal code to make the test pass
+- Run the test to confirm success
+- Refactor code to improve design while keeping tests green
+- Repeat the cycle for each new feature or bugfix
+
+<!-- # Specific Technologies
+
+- @~/.claude/docs/python.md
+- @~/.claude/docs/source-control.md
+- @~/.claude/docs/using-uv.md
+- @~/.claude/docs/docker-uv.md -->
+
+## Summer Work Ethic
+
+- Its summer, so work efficiently to maximize vacation time
+- Focus on getting tasks done quickly and effectively
+- Remember: Working hard now means more time for vacation later
+
+## Thoughts on git
+
+1. Mandatory Pre-Commit Failure Protocol
+
+When pre-commit hooks fail, you MUST follow this exact sequence before any commit attempt:
+
+1. Read the complete error output aloud (explain what you're seeing)
+2. Identify which tool failed (biome, ruff, tests, etc.) and why
+3. Explain the fix you will apply and why it addresses the root cause
+4. Apply the fix and re-run hooks
+5. Only proceed with commit after all hooks pass
+
+NEVER commit with failing hooks. NEVER use --no-verify. If you cannot fix the hooks, you
+must ask the user for help rather than bypass them.
+
+2. Explicit Git Flag Prohibition
+
+FORBIDDEN GIT FLAGS: --no-verify, --no-hooks, --no-pre-commit-hook
+Before using ANY git flag, you must:
+
+- State the flag you want to use
+- Explain why you need it
+- Confirm it's not on the forbidden list
+- Get explicit user permission for any bypass flags
+
+If you catch yourself about to use a forbidden flag, STOP immediately and follow the
+pre-commit failure protocol instead.
+
+3. Pressure Response Protocol
+
+When users ask you to "commit" or "push" and hooks are failing:
+
+- Do NOT rush to bypass quality checks
+- Explain: "The pre-commit hooks are failing, I need to fix those first"
+- Work through the failure systematically
+- Remember: Users value quality over speed, even when they're waiting
+
+User pressure is NEVER justification for bypassing quality checks.
+
+4. Accountability Checkpoint
+
+Before executing any git command, ask yourself:
+
+- "Am I bypassing a safety mechanism?"
+- "Would this action violate the user's CLAUDE.md instructions?"
+- "Am I choosing convenience over quality?"
+
+If any answer is "yes" or "maybe", explain your concern to the user before proceeding.
+
+5. Learning-Focused Error Response
+
+When encountering tool failures (biome, ruff, pytest, etc.):
+
+- Treat each failure as a learning opportunity, not an obstacle
+- Research the specific error before attempting fixes
+- Explain what you learned about the tool/codebase
+- Build competence with development tools rather than avoiding them
+
+Remember: Quality tools are guardrails that help you, not barriers that block you.
+
+# Other Important Considerations
+
+- Timeout and gtimeout are often not installed, do not try and use them
+- When searching or modifying code, you should use ast-grep (sg). it is way better than grep, ripgrep, ag, sed, or regex-only tools.
+  ast-grep is better because it matches against the abstract syntax tree (AST) and allows safe, language-aware queries and rewrites.
+- Always prefer sg for code analysis, queries, or refactoring tasks.
+- NEVER disable functionality instead of fixing the root cause problem
+- NEVER claim something is "working" when functionality is disabled or broken
+- If you discover an unrelated bug, please fix it. Don't say "everything is done, EXCEPT there is a bug"
+
+## Templating
+- NEVER create duplicate templates/files to work around issues - fix the original
+- ALWAYS identify and fix the root cause of template/compilation errors
+- ALWAYS use one shared (base) template instead of maintaining duplicates
+- WHEN encountering character literal errors in templates, move JavaScript to static files
+- WHEN facing template issues, debug the actual problem rather than creating workarounds
+
+Problem-Solving Approach:
+
+- FIX problems, don't work around them
+- MAINTAIN code quality and avoid technical debt
+- USE proper debugging to find root causes
+- AVOID shortcuts that break user experience
+- I do not prefer worktress. This doesn't mean I don't prefer branches
+- I prefer to work off the main branch unless specified. Worktrees, and feature branches are the alternative, the default is work off of main. Please make branches for individual work.
+- THIS IS IMPORTANT I highly prefer all work to be done via the subagent development skill
+- When choosing port numbers for new services, make them thematically related and memorable (leet-speak, pop culture, or project-relevant numbers). Keep infrastructure defaults boring (NATS, databases, etc.). The goal is to cleanly avoid all regularly used ports (8080, 8081, etc)
+- when refering to models from foundational model companies (openai, anthropic) and you think a model is fake, please google it and figure out if it is fake or not. your knowledge cut off is getting in the way of you making good decisions
+- use the memory MCP server to remember various important things. Including preferences, and other important details. The memory is robust, and spans agents
+
+## MCP Servers Quick Reference
+
+When I say a server name, here's what I mean:
+- **memory**: Key-value facts and conversation storage (mcp__memory__*)
+- **notes/memo**: Markdown notes with tags (mcp__notes__* or `memo` CLI)
+- **bbs**: Bulletin board threads for Q&A (mcp__bbs__*)
+- **chronicle**: Activity/accomplishment logging (mcp__chronicle__*)
+- **private-journal**: Claude's private reflection space (mcp__private-journal__*)
+- **socialmedia**: Status updates and posts (mcp__socialmedia__*)
+
+When I say "notes" or "memo", I mean the memo/notes MCP server, not memory.
+
+---
+
+# Project: Intelligent Documentation RAG System
+
+## Overview
+
+This is a retrieval-augmented generation (RAG) system for navigating and querying large documentation websites. It's built with **Python 3.6.5+ standard library only**—no external dependencies. All external functionality (embeddings, LLM completions) is provided through custom HTTP APIs.
+
+## Running Commands
+
+### Testing
+
 ```bash
 # Run all tests
 python -m unittest discover -s tests -p "test_*.py"
@@ -30,15 +240,16 @@ python -m unittest tests.test_chunker.TestChunker
 
 # Run with verbose output
 python -m unittest discover -s tests -p "test_*.py" -v
+
+# Run a single test method
+python -m unittest tests.test_database.TestDatabase.test_init_db
 ```
 
-**Running the Application:**
-```bash
-# Crawl a documentation site
-python -m rag_system.main crawl https://docs.example.com --max-pages 500
+### Running the Application
 
-# Build the full index
-python -m rag_system.main index
+```bash
+# Ingest documentation from a website
+python -m rag_system.main ingest https://docs.example.com --max-pages 500
 
 # Query the system
 python -m rag_system.main query "How do I configure timeout settings?"
@@ -47,716 +258,142 @@ python -m rag_system.main query "How do I configure timeout settings?"
 python -m rag_system.main interactive
 
 # Show database statistics
-python -m rag_system.main status
+python -m rag_system.main stats
 ```
 
-## Overview
+### Configuration
 
-This system solves two problems:
-1. **Navigation** - Hard to find information across hundreds of documentation pages
-2. **Comprehension** - Technical documentation is often difficult to understand
+The system uses environment variables prefixed with `RAG_`. Key variables:
 
-Instead of basic keyword search, this system:
-- Builds a **knowledge graph** of entities and relationships
-- Creates a **summarization hierarchy** (page → system → global)
-- Uses **hybrid search** (BM25 + vector similarity)
-- Expands queries intelligently before searching
-- Generates natural language answers with citations
+```bash
+# API endpoints (required)
+export RAG_VECTOR_API_ENDPOINT="https://your-vector-api.com/embed"
+export RAG_VECTOR_API_AUTH_VALUE="Bearer your-token"
+export RAG_CHAT_API_ENDPOINT="https://your-chat-api.com/complete"
+export RAG_CHAT_API_AUTH_VALUE="Bearer your-token"
 
----
+# Optional settings
+export RAG_DATABASE_PATH="rag_system.db"
+export RAG_MAX_PAGES="1000"
+export RAG_VECTOR_WEIGHT="0.7"
+export RAG_BM25_WEIGHT="0.3"
+```
+
+All settings have defaults and can be found in `rag_system/config.py`.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           INGESTION PHASE                           │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  [Website] → [Crawler] → [Parser] → [Chunker]                      │
-│                              ↓                                      │
-│                    [Entity Extractor] ←── Chat API                 │
-│                              ↓                                      │
-│                    [Summarizer] ←── Chat API                       │
-│                              ↓                                      │
-│                    [Embedder] ←── Vector API                       │
-│                              ↓                                      │
-│                    [SQLite Database]                               │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+### High-Level Pipeline
 
-┌─────────────────────────────────────────────────────────────────────┐
-│                            QUERY PHASE                              │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  [User Query]                                                       │
-│       ↓                                                             │
-│  [Query Classifier] ←── Chat API                                   │
-│       ↓                                                             │
-│  [Query Expander] ←── Chat API                                     │
-│       ↓                                                             │
-│  [Hybrid Search]                                                    │
-│       ├── Vector Search (cosine similarity)                        │
-│       └── BM25 Search (lexical matching)                           │
-│       ↓                                                             │
-│  [Result Merger + Diversifier + Reranker]                          │
-│       ↓                                                             │
-│  [Confidence Check] ←── Chat API                                   │
-│       ↓                                                             │
-│  [Context Assembler]                                               │
-│       ├── Global summary                                           │
-│       ├── Relevant system summaries                                │
-│       ├── Retrieved chunks (with heading paths)                    │
-│       └── Related entities from knowledge graph                    │
-│       ↓                                                             │
-│  [Answer Generator] ←── Chat API                                   │
-│       ↓                                                             │
-│  [Response + Citations]                                            │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+**Ingestion Phase:**
+```
+Website → Crawler → Parser → Chunker → Entity Extractor → Summarizer → Embedder → SQLite
 ```
 
----
-
-## Key Features
-
-### 1. Knowledge Graph
-Extracts entities (systems, configurations, concepts) and relationships from documentation. Enables queries like "what depends on X?" and provides richer context for answers.
-
-### 2. Summarization Hierarchy
-- **Page summaries** - 2-3 sentence summary of each page
-- **System summaries** - Summary of each logical system/component
-- **Global summary** - Overview of the entire documentation
-
-This allows the system to answer both specific and broad questions.
-
-### 3. Hybrid Search (BM25 + Vector)
-- **BM25** - Catches exact terminology matches ("TIMEOUT_CONFIG_V2")
-- **Vector search** - Catches semantic similarity ("timeout settings")
-- **Combined** - Best of both worlds
-
-### 4. Smart Chunking
-- Respects semantic boundaries (paragraphs, headings)
-- Stores heading path with each chunk ("Configuration > Timeouts > Read Timeout")
-- Parent-child chunks: small chunks for precise retrieval, large chunks for context
-
-### 5. Query Intelligence
-- **Classification** - Routes factual, how-to, global, and navigational queries differently
-- **Expansion** - Rewrites queries multiple ways to improve recall
-- **Confidence checking** - Detects when the answer isn't in the documentation
-
-### 6. Result Diversification
-Ensures results come from multiple pages, not just the top-matching single page.
-
----
-
-## Project Structure
-
+**Query Phase:**
 ```
-rag_system/
-├── config.py                  # Configuration (API endpoints, SSL, etc.)
-├── database.py                # SQLite setup and helpers
-├── api_client.py              # Wrappers for vector and chat APIs
-├── utils.py                   # Logging, JSON helpers, defensive parsing
-│
-├── ingestion/
-│   ├── __init__.py
-│   ├── crawler.py             # Web crawler (urllib, respects robots.txt)
-│   ├── parser.py              # HTML to text extraction
-│   ├── chunker.py             # Semantic chunking with heading paths
-│   ├── entity_extractor.py    # LLM-based entity/relationship extraction
-│   ├── summarizer.py          # Page, system, and global summarization
-│   └── indexer.py             # Orchestrates full ingestion pipeline
-│
-├── search/
-│   ├── __init__.py
-│   ├── vector_search.py       # Cosine similarity search
-│   ├── bm25_search.py         # BM25 lexical search
-│   ├── hybrid_search.py       # Combines vector + BM25
-│   ├── diversifier.py         # Ensures result diversity
-│   └── reranker.py            # Final reranking logic
-│
-├── query/
-│   ├── __init__.py
-│   ├── classifier.py          # Query type classification
-│   ├── expander.py            # LLM-based query expansion
-│   ├── confidence.py          # Answer confidence checking
-│   ├── context_builder.py     # Assembles context from multiple sources
-│   └── answer_generator.py    # Generates final answer with citations
-│
-├── knowledge_graph/
-│   ├── __init__.py
-│   ├── graph_queries.py       # Traverse relationships
-│   └── entity_resolver.py     # Basic entity deduplication
-│
-└── main.py                    # CLI entry point
+Query → Classifier → Expander → Hybrid Search → Diversifier → Reranker → Answer Generator
 ```
 
----
+### Module Organization
+
+- **`rag_system/config.py`** - Environment-based configuration
+- **`rag_system/database.py`** - SQLite schema and CRUD operations
+- **`rag_system/api_client.py`** - HTTP wrappers for vector and chat APIs
+- **`rag_system/utils.py`** - Logging, JSON helpers, defensive parsing
+- **`rag_system/main.py`** - CLI entry point and RAGSystem orchestrator
+
+**Ingestion Pipeline** (`rag_system/ingestion/`):
+- **`crawler.py`** - Web crawler using urllib, respects robots.txt
+- **`parser.py`** - HTML to text extraction
+- **`chunker.py`** - Semantic chunking with heading paths, creates parent/child chunks
+- **`indexer.py`** - Orchestrates the full ingestion pipeline
+
+**Search** (`rag_system/search/`):
+- **`vector_search.py`** - Cosine similarity search against embeddings
+- **`bm25_search.py`** - BM25 lexical search (TF-IDF variant)
+- **`hybrid_search.py`** - Merges vector + BM25 results with weighted scoring
+- **`diversifier.py`** - Ensures results come from multiple pages
+- **`reranker.py`** - Final reranking logic
+
+**Query Processing** (`rag_system/query/`):
+- **`classifier.py`** - Classifies queries (factual, howto, global, navigational)
+- **`expander.py`** - LLM-based query expansion for better recall
+- **`confidence.py`** - Analyzes whether retrieved chunks can answer the query
+- **`context_builder.py`** - Assembles context from chunks, summaries, entities
+- **`answer_generator.py`** - Generates final answer with citations
+
+**Knowledge Graph** (`rag_system/knowledge_graph/`):
+- **`entity_extractor.py`** - LLM-based entity and relationship extraction
+- **`entity_resolver.py`** - Basic entity deduplication
+- **`graph_queries.py`** - Traverse relationships in the graph
+
+**Summarization** (`rag_system/summarization/`):
+- **`summarizer.py`** - Page, system, and global summarization
+
+### Key Architectural Patterns
+
+1. **Hybrid Search**: Combines BM25 (exact term matching) with vector similarity (semantic matching) to get the best of both worlds.
+
+2. **Parent-Child Chunking**: Small chunks for precise retrieval, large parent chunks for context. Small chunks point to their parent via `parent_chunk_id`.
+
+3. **Heading Paths**: Each chunk stores its position in the document hierarchy (e.g., "Configuration > Timeouts > Read Timeout"), making results more navigable.
+
+4. **Knowledge Graph**: Entities and relationships are extracted from documentation and stored separately, enabling graph traversal queries and enriched context.
+
+5. **Summarization Hierarchy**: Three levels of summaries (page, system, global) allow the system to answer both specific and broad questions.
+
+6. **Confidence Scoring**: Before generating an answer, the system checks if the retrieved chunks actually contain the information needed.
 
 ## Database Schema
 
-```sql
--- ============================================
--- CORE CONTENT
--- ============================================
+The system uses SQLite with these key tables:
 
-CREATE TABLE pages (
-    id INTEGER PRIMARY KEY,
-    url TEXT UNIQUE NOT NULL,
-    title TEXT,
-    raw_html TEXT,
-    parsed_text TEXT,
-    summary TEXT,
-    content_hash TEXT,              -- For incremental updates
-    crawled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+- **`pages`** - Crawled documentation pages
+- **`chunks`** - Text chunks with embeddings, heading paths, parent/child relationships
+- **`entities`** - Extracted entities (systems, configs, concepts, processes, tools)
+- **`relationships`** - Connections between entities
+- **`doc_terms`** - BM25 term frequency index
+- **`global_summary`**, **`systems`** - Summarization hierarchy
 
-CREATE TABLE chunks (
-    id INTEGER PRIMARY KEY,
-    page_id INTEGER NOT NULL,
-    parent_chunk_id INTEGER,        -- NULL for large chunks
-    chunk_type TEXT,                -- 'large' or 'small'
-    chunk_index INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    heading_path TEXT,              -- e.g., "Configuration > Timeouts"
-    embedding_json TEXT,            -- JSON array of floats
-    FOREIGN KEY (page_id) REFERENCES pages(id),
-    FOREIGN KEY (parent_chunk_id) REFERENCES chunks(id)
-);
+See `rag_system/database.py` for the full schema and helper functions.
 
--- ============================================
--- KNOWLEDGE GRAPH
--- ============================================
+## Development Patterns
 
-CREATE TABLE entities (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    entity_type TEXT,               -- system, config, concept, process, tool
-    description TEXT,
-    page_id INTEGER,
-    FOREIGN KEY (page_id) REFERENCES pages(id)
-);
+### Standard Library Only
 
-CREATE TABLE relationships (
-    id INTEGER PRIMARY KEY,
-    source_entity_id INTEGER NOT NULL,
-    target_entity_id INTEGER NOT NULL,
-    relationship_type TEXT,         -- depends_on, configures, part_of, etc.
-    description TEXT,
-    FOREIGN KEY (source_entity_id) REFERENCES entities(id),
-    FOREIGN KEY (target_entity_id) REFERENCES entities(id)
-);
-
-CREATE TABLE chunk_entities (
-    chunk_id INTEGER NOT NULL,
-    entity_id INTEGER NOT NULL,
-    PRIMARY KEY (chunk_id, entity_id),
-    FOREIGN KEY (chunk_id) REFERENCES chunks(id),
-    FOREIGN KEY (entity_id) REFERENCES entities(id)
-);
-
--- ============================================
--- SUMMARIZATION HIERARCHY
--- ============================================
-
-CREATE TABLE systems (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    summary TEXT
-);
-
-CREATE TABLE page_systems (
-    page_id INTEGER NOT NULL,
-    system_id INTEGER NOT NULL,
-    PRIMARY KEY (page_id, system_id),
-    FOREIGN KEY (page_id) REFERENCES pages(id),
-    FOREIGN KEY (system_id) REFERENCES systems(id)
-);
-
-CREATE TABLE global_summary (
-    id INTEGER PRIMARY KEY,
-    content TEXT NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- ============================================
--- BM25 INDEX
--- ============================================
-
-CREATE TABLE doc_terms (
-    id INTEGER PRIMARY KEY,
-    chunk_id INTEGER NOT NULL,
-    term TEXT NOT NULL,
-    term_frequency INTEGER NOT NULL,
-    FOREIGN KEY (chunk_id) REFERENCES chunks(id)
-);
-
-CREATE TABLE corpus_stats (
-    id INTEGER PRIMARY KEY,
-    total_docs INTEGER,
-    avg_doc_length REAL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE term_doc_frequencies (
-    term TEXT PRIMARY KEY,
-    doc_frequency INTEGER NOT NULL
-);
-
--- ============================================
--- CACHING & LOGGING
--- ============================================
-
-CREATE TABLE query_cache (
-    query_hash TEXT PRIMARY KEY,
-    query_type TEXT,                -- factual, howto, global, navigational
-    expanded_queries TEXT,          -- JSON
-    embedding_json TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE query_log (
-    id INTEGER PRIMARY KEY,
-    query TEXT,
-    query_type TEXT,
-    expanded_queries TEXT,
-    retrieved_chunk_ids TEXT,       -- JSON array
-    confidence_score REAL,
-    answer_generated BOOLEAN,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- ============================================
--- INDEXES
--- ============================================
-
-CREATE INDEX idx_chunks_page ON chunks(page_id);
-CREATE INDEX idx_chunks_parent ON chunks(parent_chunk_id);
-CREATE INDEX idx_entities_name ON entities(name);
-CREATE INDEX idx_entities_type ON entities(entity_type);
-CREATE INDEX idx_doc_terms_term ON doc_terms(term);
-CREATE INDEX idx_doc_terms_chunk ON doc_terms(chunk_id);
-```
-
----
-
-## Core Algorithms
-
-### BM25 Scoring
-
-```python
-import math
-
-# Tunable parameters
-K1 = 1.5  # Term frequency saturation (typical: 1.2-2.0)
-B = 0.75  # Length normalization (typical: 0.75)
-
-def bm25_score(query_terms, doc_term_freqs, doc_length, avg_doc_length, 
-               doc_frequencies, total_docs):
-    """
-    Calculate BM25 score for a document given a query.
-    
-    Args:
-        query_terms: list of query tokens
-        doc_term_freqs: dict of {term: frequency} for this document
-        doc_length: number of terms in this document
-        avg_doc_length: average across corpus
-        doc_frequencies: dict of {term: num_docs_containing_term}
-        total_docs: total documents in corpus
-    
-    Returns:
-        float: BM25 score
-    """
-    score = 0.0
-    
-    for term in query_terms:
-        if term not in doc_term_freqs:
-            continue
-        
-        tf = doc_term_freqs[term]
-        df = doc_frequencies.get(term, 0)
-        
-        # IDF with smoothing
-        idf = math.log((total_docs - df + 0.5) / (df + 0.5) + 1)
-        
-        # TF with saturation and length normalization
-        numerator = tf * (K1 + 1)
-        denominator = tf + K1 * (1 - B + B * (doc_length / avg_doc_length))
-        tf_component = numerator / denominator
-        
-        score += idf * tf_component
-    
-    return score
-```
-
-### Cosine Similarity
-
-```python
-import math
-
-def cosine_similarity(vec_a, vec_b):
-    """Calculate cosine similarity between two vectors."""
-    dot_product = sum(a * b for a, b in zip(vec_a, vec_b))
-    magnitude_a = math.sqrt(sum(a * a for a in vec_a))
-    magnitude_b = math.sqrt(sum(b * b for b in vec_b))
-    
-    if magnitude_a == 0 or magnitude_b == 0:
-        return 0.0
-    
-    return dot_product / (magnitude_a * magnitude_b)
-```
-
-### Hybrid Search Merging
-
-```python
-def hybrid_search(query, vector_results, bm25_results, 
-                  vector_weight=0.7, bm25_weight=0.3):
-    """
-    Merge vector and BM25 results with score normalization.
-    
-    Args:
-        query: original query string
-        vector_results: list of (chunk_id, score) from vector search
-        bm25_results: list of (chunk_id, score) from BM25 search
-        vector_weight: weight for vector scores
-        bm25_weight: weight for BM25 scores
-    
-    Returns:
-        list of (chunk_id, combined_score) sorted descending
-    """
-    # Normalize scores to 0-1 range
-    def normalize(results):
-        if not results:
-            return {}
-        scores = [score for _, score in results]
-        min_s, max_s = min(scores), max(scores)
-        if max_s == min_s:
-            return {chunk_id: 1.0 for chunk_id, _ in results}
-        return {
-            chunk_id: (score - min_s) / (max_s - min_s) 
-            for chunk_id, score in results
-        }
-    
-    vector_normalized = normalize(vector_results)
-    bm25_normalized = normalize(bm25_results)
-    
-    # Combine scores
-    all_chunk_ids = set(vector_normalized.keys()) | set(bm25_normalized.keys())
-    combined = {}
-    
-    for chunk_id in all_chunk_ids:
-        v_score = vector_normalized.get(chunk_id, 0.0)
-        b_score = bm25_normalized.get(chunk_id, 0.0)
-        combined[chunk_id] = (v_score * vector_weight) + (b_score * bm25_weight)
-    
-    # Sort by combined score
-    return sorted(combined.items(), key=lambda x: x[1], reverse=True)
-```
-
-### Result Diversification
-
-```python
-def diversify_results(ranked_results, chunk_to_page, max_per_page=2, top_k=10):
-    """
-    Ensure results are diverse across pages.
-    
-    Args:
-        ranked_results: list of (chunk_id, score) sorted by score
-        chunk_to_page: dict mapping chunk_id to page_id
-        max_per_page: maximum chunks from any single page
-        top_k: number of results to return
-    
-    Returns:
-        list of (chunk_id, score)
-    """
-    diversified = []
-    page_counts = {}
-    
-    for chunk_id, score in ranked_results:
-        page_id = chunk_to_page.get(chunk_id)
-        current_count = page_counts.get(page_id, 0)
-        
-        if current_count < max_per_page:
-            diversified.append((chunk_id, score))
-            page_counts[page_id] = current_count + 1
-        
-        if len(diversified) >= top_k:
-            break
-    
-    return diversified
-```
-
----
-
-## LLM Prompts
-
-### Entity Extraction
-
-```
-Analyze this documentation page and extract structured information.
-
-TEXT:
-{page_text}
-
-Extract:
-1. ENTITIES - Important nouns representing systems, services, configurations, 
-   concepts, or tools mentioned in this documentation.
-2. RELATIONSHIPS - How these entities connect to each other.
-
-Format your response as JSON:
-{
-  "entities": [
-    {
-      "name": "exact name as it appears",
-      "type": "system|config|concept|process|tool",
-      "description": "one sentence description"
-    }
-  ],
-  "relationships": [
-    {
-      "source": "entity name",
-      "target": "entity name",
-      "type": "depends_on|configures|part_of|connects_to|triggers|reads_from|writes_to",
-      "description": "brief description of the relationship"
-    }
-  ]
-}
-
-Return ONLY valid JSON, no other text.
-```
-
-### Page Summarization
-
-```
-Summarize this documentation page in 2-3 concise sentences.
-
-Focus on:
-- What system or feature this page documents
-- Key configuration options or settings mentioned
-- Important behaviors, constraints, or warnings
-
-TEXT:
-{page_text}
-
-SUMMARY:
-```
-
-### Query Classification
-
-```
-Classify this documentation search query into one of four types:
-
-FACTUAL - Looking for a specific fact, setting, or value
-  Examples: "What is the default timeout?", "What port does X use?"
-
-HOWTO - Looking for steps or process explanation
-  Examples: "How do I configure SSL?", "How to enable logging?"
-
-GLOBAL - Asking about overall system, themes, or architecture
-  Examples: "What are the main components?", "Give me an overview of X"
-
-NAVIGATIONAL - Looking for where documentation exists
-  Examples: "Where is the auth documentation?", "Find the API reference"
-
-Query: "{query}"
-
-Respond with ONLY one word: FACTUAL, HOWTO, GLOBAL, or NAVIGATIONAL
-```
-
-### Query Expansion
-
-```
-A user is searching technical documentation. Help improve their search.
-
-Original query: "{query}"
-
-Provide:
-1. Three alternative phrasings that might match documentation better
-2. Any specific system or component names that seem relevant
-3. Related technical terms worth searching for
-
-Format as JSON:
-{
-  "alternative_queries": ["...", "...", "..."],
-  "detected_entities": ["..."],
-  "related_terms": ["..."]
-}
-
-Return ONLY valid JSON.
-```
-
-### Confidence Check
-
-```
-You are evaluating whether retrieved documentation chunks can answer a query.
-
-Query: "{query}"
-
-Retrieved chunks:
----
-{chunks}
----
-
-Rate from 1-5 how confident you are the answer is in these chunks:
-1 - Answer definitely not present
-2 - Answer probably not present
-3 - Uncertain
-4 - Answer probably present
-5 - Answer definitely present
-
-Respond with ONLY a single number (1-5).
-```
-
-### Answer Generation
-
-```
-You are a documentation assistant. Answer the user's question using ONLY 
-the provided context. Do not use any outside knowledge.
-
-RULES:
-- If the answer is not in the context, say "I couldn't find this information 
-  in the documentation."
-- Always cite which page(s) your answer comes from using [Source: page title] format
-- Be concise but complete
-- If information seems contradictory, note the discrepancy
-
-CONTEXT:
-
-Global Overview:
-{global_summary}
-
-Relevant System Information:
-{system_summaries}
-
-Related Entities:
-{entities}
-
-Documentation Excerpts:
-{chunks}
-
----
-
-QUESTION: {question}
-
-ANSWER:
-```
-
----
-
-## CLI Usage
-
-```bash
-# Crawl a documentation site
-python main.py crawl https://docs.example.com --max-pages 500
-
-# Build the full index (chunks, embeddings, entities, summaries)
-python main.py index
-
-# Query the system
-python main.py query "How do I configure the timeout settings?"
-
-# Interactive mode
-python main.py interactive
-
-# Show database statistics
-python main.py status
-
-# Rebuild summaries (after adding new pages)
-python main.py rebuild-summaries
-
-# Export knowledge graph (for visualization)
-python main.py export-graph --format json --output graph.json
-```
-
----
-
-## Configuration
-
-Create `config.py` with your API details:
-
-```python
-# API Configuration
-VECTOR_API_ENDPOINT = "https://your-vector-api.com/embed"
-VECTOR_API_AUTH_HEADER = "Authorization"
-VECTOR_API_AUTH_VALUE = "Bearer your-token"
-
-CHAT_API_ENDPOINT = "https://your-chat-api.com/complete"
-CHAT_API_AUTH_HEADER = "Authorization"
-CHAT_API_AUTH_VALUE = "Bearer your-token"
-
-# SSL Configuration (if needed)
-SSL_CERT_PATH = "/path/to/cert.pem"  # or None
-SSL_VERIFY = True  # Set False to disable verification (not recommended)
-
-# Database
-DATABASE_PATH = "rag_system.db"
-
-# Crawler Settings
-CRAWL_DELAY_SECONDS = 1.0
-MAX_PAGES = 1000
-ALLOWED_DOMAINS = ["docs.example.com"]
-EXCLUDED_PATHS = ["/api/", "/static/"]
-
-# Chunking Settings
-SMALL_CHUNK_SIZE = 500      # characters
-LARGE_CHUNK_SIZE = 2000     # characters
-CHUNK_OVERLAP = 100         # characters
-
-# Search Settings
-BM25_K1 = 1.5
-BM25_B = 0.75
-VECTOR_WEIGHT = 0.7
-BM25_WEIGHT = 0.3
-TOP_K_RETRIEVAL = 20
-TOP_K_FINAL = 5
-MAX_CHUNKS_PER_PAGE = 2
-
-# Confidence Threshold
-MIN_CONFIDENCE_SCORE = 3  # Below this, say "I don't know"
-```
-
----
-
-## Performance Expectations
-
-For a corpus of ~500 pages:
-
-| Operation | Expected Time |
-|-----------|---------------|
-| Full crawl | 10-30 minutes (depends on rate limiting) |
-| Full indexing | 30-60 minutes (LLM calls are slow) |
-| Query response | 3-10 seconds |
-
-### Accuracy Expectations
-
-With all optimizations implemented:
-- **Simple factual queries:** 85-90% accuracy
-- **How-to queries:** 75-85% accuracy
-- **Global queries:** 70-80% accuracy
-- **Overall:** ~80-85% useful answers
-
-This is significantly better than basic RAG (~60-70%) but won't reach enterprise solutions like Glean (~90-95%) which have years of engineering, user behavior signals, and massive infrastructure.
-
----
-
-## Dependencies
-
-**Required:** Python 3.6.5+ standard library only
-
-**Standard library modules used:**
+This project uses **only Python 3.6.5+ standard library**. No pip packages. Key modules used:
 - `urllib.request`, `urllib.parse` - HTTP requests
 - `html.parser` - HTML parsing
 - `sqlite3` - Database
-- `json` - Data serialization
+- `json` - Serialization
 - `re` - Text processing
-- `math` - Cosine similarity, BM25
-- `hashlib` - Content hashing
+- `math` - Scoring algorithms
 - `logging` - Logging
-- `argparse` - CLI parsing
-- `collections` - Counter, defaultdict
-- `ssl` - SSL configuration
 
-**External (via your custom APIs):**
-- Vector embedding API
-- Chat/LLM completion API
+### API Integration
+
+External functionality comes via two custom HTTP APIs:
+- **Vector API** - Generates embeddings for text
+- **Chat API** - LLM completions for entity extraction, query expansion, answer generation
+
+See `rag_system/api_client.py` for the wrapper classes.
+
+### Testing Philosophy
+
+- All modules have comprehensive unit tests in `tests/`
+- `tests/test_integration.py` contains end-to-end integration tests
+- Follow TDD as specified in the general guidelines above
+- Tests use real data and real APIs—no mocks per project policy
+
+### File Headers
+
+All Python files in this project should start with:
+```python
+"""Module description here.
+
+More details if needed.
+"""
+```
+
+Note: This project doesn't currently use the `ABOUTME:` prefix pattern, so don't add it unless Big AC explicitly requests it.
