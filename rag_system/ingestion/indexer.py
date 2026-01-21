@@ -5,6 +5,7 @@ and storing in the database.
 """
 
 from typing import Dict, List, Optional, Any, Generator
+import os
 
 from rag_system import config
 from rag_system.database import (
@@ -175,16 +176,21 @@ class Indexer:
 
     def crawl_and_index(self, start_url: str, allowed_domains: List[str],
                         excluded_paths: Optional[List[str]] = None,
+                        included_paths: Optional[List[str]] = None,
                         max_pages: int = 1000,
-                        delay: float = 1.0) -> Dict[str, int]:
+                        delay: float = 1.0,
+                        ignore_robots: bool = False) -> Dict[str, int]:
         """Crawl a website and index all pages.
 
         Args:
             start_url: Starting URL.
             allowed_domains: List of allowed domains.
             excluded_paths: List of path prefixes to exclude.
+            included_paths: List of path prefixes to include. If set, only URLs
+                          whose path starts with one of these will be crawled.
             max_pages: Maximum pages to crawl.
             delay: Delay between requests.
+            ignore_robots: If True, ignore robots.txt restrictions.
 
         Returns:
             Dict with crawl/index statistics.
@@ -193,8 +199,11 @@ class Indexer:
             start_url=start_url,
             allowed_domains=allowed_domains,
             excluded_paths=excluded_paths or config.EXCLUDED_PATHS,
+            included_paths=included_paths or config.INCLUDED_PATHS,
             max_pages=max_pages,
-            delay=delay
+            delay=delay,
+            cache_dir=os.environ.get('RAG_HTTP_CACHE_DIR'),
+            ignore_robots=ignore_robots
         )
 
         pages_crawled = 0
@@ -213,6 +222,13 @@ class Indexer:
             except Exception as e:
                 logger.error(f"Error indexing {page_data.get('url')}: {e}")
                 errors += 1
+
+        # Build BM25 index for search
+        from rag_system.search.bm25_search import BM25Index
+        logger.info("Building BM25 search index...")
+        bm25_index = BM25Index(self.db_path)
+        bm25_index.build()
+        logger.info("BM25 index built successfully")
 
         return {
             'pages_crawled': pages_crawled,
