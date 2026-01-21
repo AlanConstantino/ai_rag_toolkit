@@ -8,7 +8,11 @@ from typing import Dict, List, Any, Tuple, Optional
 
 from rag_system import config
 from rag_system.database import init_db, get_connection
-from rag_system.api_client import VectorAPIClient, ChatAPIClient
+import os
+from rag_system.api_client import (
+    VectorAPIClient, ChatAPIClient,
+    create_openai_vector_client, create_openai_chat_client
+)
 from rag_system.search.bm25_search import BM25Search
 from rag_system.search.vector_search import VectorSearch
 from rag_system.search.hybrid_search import HybridSearch
@@ -387,7 +391,19 @@ def main() -> None:
         parser.print_help()
         return
 
-    rag = RAGSystem(db_path=args.db)
+    # Create OpenAI clients if API key is available
+    vector_client = None
+    chat_client = None
+    if os.environ.get('OPENAI_API_KEY'):
+        logger.info("Using OpenAI API for embeddings and chat")
+        vector_client = create_openai_vector_client()
+        chat_client = create_openai_chat_client()
+
+    rag = RAGSystem(
+        db_path=args.db,
+        vector_client=vector_client,
+        chat_client=chat_client
+    )
 
     if args.command == 'ingest':
         print(f"Ingesting from {args.url}...")
