@@ -105,11 +105,24 @@ class HeadingExtractor(HTMLParser):
 
     HEADING_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
 
+    # Common UI/navigation headings to ignore (case-insensitive)
+    IGNORE_HEADINGS = {
+        'navigation', 'table of contents', 'contents', 'toc',
+        'previous topic', 'next topic', 'this page',
+        'quick search', 'search', 'menu', 'sidebar',
+        'related topics', 'see also', 'footer', 'header',
+    }
+
     def __init__(self):
         super().__init__()
         self.headings: List[Dict[str, Any]] = []
         self.current_heading: Optional[Dict[str, Any]] = None
         self.current_text: List[str] = []
+
+    def _is_ignored_heading(self, text: str) -> bool:
+        """Check if heading text should be ignored."""
+        normalized = text.lower().strip()
+        return normalized in self.IGNORE_HEADINGS
 
     def handle_starttag(self, tag: str, attrs: List[tuple]) -> None:
         tag = tag.lower()
@@ -122,7 +135,8 @@ class HeadingExtractor(HTMLParser):
         tag = tag.lower()
         if tag in self.HEADING_TAGS and self.current_heading:
             self.current_heading['text'] = ' '.join(self.current_text).strip()
-            if self.current_heading['text']:
+            # Only add if non-empty and not an ignored UI heading
+            if self.current_heading['text'] and not self._is_ignored_heading(self.current_heading['text']):
                 self.headings.append(self.current_heading)
             self.current_heading = None
             self.current_text = []

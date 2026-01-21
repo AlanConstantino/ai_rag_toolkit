@@ -186,7 +186,10 @@ class SemanticChunker:
 
     def chunk_document(self, text: str,
                        headings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Chunk a document into large and small chunks.
+        """Chunk a document into large and small chunks with proper heading paths.
+
+        First splits text by headings to preserve section structure, then creates
+        large and small chunks within each section with the correct heading path.
 
         Args:
             text: Document text.
@@ -199,27 +202,40 @@ class SemanticChunker:
             return []
 
         chunks = []
-
-        # Determine heading path for the whole document
-        default_path = build_heading_path(headings, max([h['level'] for h in headings], default=0)) if headings else ''
-
-        # Create large chunks first
-        large_texts = chunk_text(text, self.large_chunk_size, self.overlap)
         large_chunks = []
+        large_index = 0
+        small_index = 0
 
-        for i, content in enumerate(large_texts):
-            chunk = {
-                'type': 'large',
-                'content': content,
-                'index': i,
-                'heading_path': default_path,
-                'parent_index': None
-            }
-            large_chunks.append(chunk)
-            chunks.append(chunk)
+        # Split document by headings first to get proper section boundaries
+        sections = chunk_by_headings(text, headings)
+
+        for section in sections:
+            section_content = section['content']
+            section_path = section['heading_path']
+
+            # Skip empty sections
+            if not section_content.strip():
+                continue
+
+            # Create large chunks for this section
+            large_texts = chunk_text(section_content, self.large_chunk_size, self.overlap)
+
+            for content in large_texts:
+                if not content.strip():
+                    continue
+
+                large_chunk = {
+                    'type': 'large',
+                    'content': content,
+                    'index': large_index,
+                    'heading_path': section_path,
+                    'parent_index': None
+                }
+                large_chunks.append(large_chunk)
+                chunks.append(large_chunk)
+                large_index += 1
 
         # Create small chunks and link to parent large chunks
-        small_index = 0
         for large_idx, large_chunk in enumerate(large_chunks):
             small_texts = chunk_text(
                 large_chunk['content'],
@@ -228,6 +244,9 @@ class SemanticChunker:
             )
 
             for content in small_texts:
+                if not content.strip():
+                    continue
+
                 chunk = {
                     'type': 'small',
                     'content': content,
