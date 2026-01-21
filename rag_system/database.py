@@ -354,6 +354,65 @@ def get_all_chunks_with_embeddings(conn: sqlite3.Connection) -> List[Dict[str, A
     return [dict(row) for row in cursor.fetchall()]
 
 
+def delete_chunks_by_page(conn: sqlite3.Connection, page_id: int) -> int:
+    """Delete all chunks for a page.
+
+    Used when re-indexing a page whose content has changed.
+
+    Args:
+        conn: Database connection.
+        page_id: ID of the page whose chunks should be deleted.
+
+    Returns:
+        Number of chunks deleted.
+    """
+    cursor = conn.execute("DELETE FROM chunks WHERE page_id = ?", (page_id,))
+    conn.commit()
+    return cursor.rowcount
+
+
+def delete_doc_terms_by_page(conn: sqlite3.Connection, page_id: int) -> int:
+    """Delete all BM25 doc_terms entries for a page's chunks.
+
+    Used when re-indexing a page whose content has changed.
+
+    Args:
+        conn: Database connection.
+        page_id: ID of the page whose terms should be deleted.
+
+    Returns:
+        Number of term entries deleted.
+    """
+    cursor = conn.execute(
+        "DELETE FROM doc_terms WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?)",
+        (page_id,)
+    )
+    conn.commit()
+    return cursor.rowcount
+
+
+def update_page_content(conn: sqlite3.Connection, page_id: int,
+                        title: str, raw_html: str, parsed_text: str,
+                        content_hash: str) -> None:
+    """Update a page's content fields.
+
+    Used when re-indexing a page whose content has changed.
+
+    Args:
+        conn: Database connection.
+        page_id: ID of the page to update.
+        title: New page title.
+        raw_html: New raw HTML content.
+        parsed_text: New parsed text content.
+        content_hash: New content hash.
+    """
+    conn.execute(
+        "UPDATE pages SET title = ?, raw_html = ?, parsed_text = ?, content_hash = ?, crawled_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (title, raw_html, parsed_text, content_hash, page_id)
+    )
+    conn.commit()
+
+
 # =============================================================================
 # Entity Operations
 # =============================================================================

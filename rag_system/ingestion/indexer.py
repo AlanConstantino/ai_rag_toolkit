@@ -10,7 +10,8 @@ import os
 from rag_system import config
 from rag_system.database import (
     get_connection, insert_page, get_page_by_url,
-    insert_chunk, update_chunk_embedding
+    insert_chunk, update_chunk_embedding,
+    delete_chunks_by_page, delete_doc_terms_by_page, update_page_content
 )
 from rag_system.ingestion.crawler import Crawler
 from rag_system.ingestion.parser import parse_html, extract_title
@@ -82,40 +83,38 @@ class Indexer:
         conn = get_connection(self.db_path)
 
         try:
-            # Check if page already exists
-            existing = get_page_by_url(conn, url)
-            if existing:
-                # Check if content changed
-                content_hash = hash_content(html)
-                if existing.get('content_hash') == content_hash:
-                    logger.info(f"Skipping unchanged page: {url}")
-                    return None
-                # TODO: Handle page updates
-                logger.info(f"Page exists, skipping: {url}")
-                return existing['id']
-
             # Parse HTML for title and basic text
             parsed = parse_html(html, remove_nav=True, remove_footer=True)
 
             # Convert HTML to Markdown for chunking (Markdown-first approach)
-            # This naturally filters out nav/sidebar/footer as they don't convert
-            # to meaningful Markdown structure
             markdown = html_to_markdown(html)
 
             # Generate content hash
             content_hash = hash_content(html)
+            title = parsed['title'] or extract_title(html)
 
-            # Insert page
-            page_id = insert_page(
-                conn,
-                url=url,
-                title=parsed['title'] or extract_title(html),
-                raw_html=html,
-                parsed_text=markdown,  # Store markdown instead of parsed text
-                content_hash=content_hash
-            )
+            # Check if page already exists
+            existing = get_page_by_url(conn, url)
+            if existing:
+                # Check if content changed
+                if existing.get('content_hash') == content_hash:
+                    logger.info(f"Skipping unchanged page: {url}")
+                    return None
 
-            logger.info(f"Indexed page: {url} (id={page_id})")
+                # Content changed - perform incremental update
+                page_id = existing['id']
+                logger.info(f"Content changed for page: {url} - re-indexing")
+
+                # Delete old data (terms must be deleted before chunks due to foreign key)
+                delete_doc_terms_by_page(conn, page_id)
+                delete_chunks_by_page(conn, page_id)
+
+                # Update page content
+                update_page_content(conn, page_id, title, html, markdown, content_hash)
+            else:
+                # New page - insert it
+                page_id = insert_page(conn, url, title, html, markdown, content_hash)
+                logger.info(f"Indexed new page: {url} (id={page_id})")
 
             # Create chunks from Markdown (heading structure is unambiguous in MD)
             chunk_result = chunk_markdown(
