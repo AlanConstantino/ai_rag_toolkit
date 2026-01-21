@@ -63,13 +63,24 @@ ALLOWED_DOMAINS = [d.strip() for d in _allowed_domains.split(',') if d.strip()] 
 _excluded_paths = os.environ.get('RAG_EXCLUDED_PATHS', '/api/,/static/')
 EXCLUDED_PATHS = [p.strip() for p in _excluded_paths.split(',') if p.strip()]
 
+# Parse INCLUDED_PATHS from comma-separated string
+_included_paths = os.environ.get('RAG_INCLUDED_PATHS', '')
+INCLUDED_PATHS = [p.strip() for p in _included_paths.split(',') if p.strip()] if _included_paths else None
+
 # =============================================================================
 # Chunking Settings
 # =============================================================================
 
+# Character-based chunk sizes
 SMALL_CHUNK_SIZE = int(os.environ.get('RAG_SMALL_CHUNK_SIZE', '500'))
 LARGE_CHUNK_SIZE = int(os.environ.get('RAG_LARGE_CHUNK_SIZE', '2000'))
 CHUNK_OVERLAP = int(os.environ.get('RAG_CHUNK_OVERLAP', '100'))
+
+# Token-based chunk sizes
+USE_TOKEN_CHUNKING = os.environ.get('RAG_USE_TOKEN_CHUNKING', 'false').lower() in ('true', '1', 'yes')
+SMALL_CHUNK_TOKENS = int(os.environ.get('RAG_SMALL_CHUNK_TOKENS', '128'))
+LARGE_CHUNK_TOKENS = int(os.environ.get('RAG_LARGE_CHUNK_TOKENS', '512'))
+CHUNK_OVERLAP_TOKENS = int(os.environ.get('RAG_CHUNK_OVERLAP_TOKENS', '25'))
 
 # =============================================================================
 # Search Settings
