@@ -261,6 +261,98 @@ class SemanticChunker:
 
 
 # =============================================================================
+# Markdown-Based Chunking
+# =============================================================================
+
+def chunk_markdown(markdown: str,
+                   small_chunk_size: Optional[int] = None,
+                   large_chunk_size: Optional[int] = None,
+                   overlap: Optional[int] = None) -> Dict[str, List[Dict[str, Any]]]:
+    """Chunk Markdown text based on its heading structure.
+
+    This is the preferred chunking method as Markdown headings are unambiguous
+    content structure (unlike HTML where navigation headings can pollute results).
+
+    Args:
+        markdown: Markdown text to chunk.
+        small_chunk_size: Size for small chunks.
+        large_chunk_size: Size for large chunks.
+        overlap: Overlap between chunks.
+
+    Returns:
+        Dict with 'large_chunks' and 'small_chunks' lists.
+    """
+    from rag_system.ingestion.html_to_markdown import split_markdown_by_headings
+
+    if not markdown:
+        return {'large_chunks': [], 'small_chunks': []}
+
+    small_size = small_chunk_size or config.SMALL_CHUNK_SIZE
+    large_size = large_chunk_size or config.LARGE_CHUNK_SIZE
+    chunk_overlap = overlap or config.CHUNK_OVERLAP
+
+    # Split markdown by headings
+    sections = split_markdown_by_headings(markdown)
+
+    chunks = []
+    large_chunks = []
+    large_index = 0
+    small_index = 0
+
+    for section in sections:
+        section_content = section['content']
+        section_path = section['heading_path']
+
+        if not section_content.strip():
+            continue
+
+        # Create large chunks for this section
+        large_texts = chunk_text(section_content, large_size, chunk_overlap)
+
+        for content in large_texts:
+            if not content.strip():
+                continue
+
+            large_chunk = {
+                'type': 'large',
+                'content': content,
+                'index': large_index,
+                'heading_path': section_path,
+                'parent_index': None
+            }
+            large_chunks.append(large_chunk)
+            chunks.append(large_chunk)
+            large_index += 1
+
+    # Create small chunks linked to parent large chunks
+    for large_idx, large_chunk in enumerate(large_chunks):
+        small_texts = chunk_text(
+            large_chunk['content'],
+            small_size,
+            chunk_overlap // 2
+        )
+
+        for content in small_texts:
+            if not content.strip():
+                continue
+
+            chunk = {
+                'type': 'small',
+                'content': content,
+                'index': small_index,
+                'heading_path': large_chunk['heading_path'],
+                'parent_index': large_idx
+            }
+            chunks.append(chunk)
+            small_index += 1
+
+    return {
+        'large_chunks': [c for c in chunks if c['type'] == 'large'],
+        'small_chunks': [c for c in chunks if c['type'] == 'small']
+    }
+
+
+# =============================================================================
 # Main Function
 # =============================================================================
 
