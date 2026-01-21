@@ -93,3 +93,17 @@ MAX_CHUNKS_PER_PAGE = int(os.environ.get('RAG_MAX_CHUNKS_PER_PAGE', '2'))
 
 MIN_CONFIDENCE_SCORE = int(os.environ.get('RAG_MIN_CONFIDENCE_SCORE', '3'))
 CONFIDENCE_THRESHOLD = float(os.environ.get('RAG_CONFIDENCE_THRESHOLD', '0.5'))
+
+# =============================================================================
+# Embedding Settings
+# =============================================================================
+
+EMBEDDING_BATCH_SIZE = int(os.environ.get('RAG_EMBEDDING_BATCH_SIZE', '100'))
+EMBEDDING_BATCH_DELAY = float(os.environ.get('RAG_EMBEDDING_BATCH_DELAY', '0.1'))
+EMBEDDING_MAX_RETRIES = int(os.environ.get('RAG_EMBEDDING_MAX_RETRIES', '3'))
+
+# =============================================================================
+# HTTP Cache Configuration
+# =============================================================================
+
+HTTP_CACHE_DIR = os.environ.get('RAG_HTTP_CACHE_DIR', None)

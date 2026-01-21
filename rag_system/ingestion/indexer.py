@@ -4,10 +4,12 @@ Orchestrates the full ingestion pipeline: crawling, parsing, chunking,
 and storing in the database.
 """
 
-from typing import Dict, List, Optional, Any, Generator
+from typing import Dict, List, Optional, Any
 import os
+import time
 
 from rag_system import config
+from rag_system.api_client import APIError
 from rag_system.database import (
     get_connection, insert_page, get_page_by_url,
     insert_chunk, update_chunk_embedding,
@@ -172,29 +174,96 @@ class Indexer:
 
     def _generate_embeddings(self, conn, chunks: List[Dict], chunk_ids: List[int],
                               page_title: Optional[str] = None) -> None:
-        """Generate and store embeddings for chunks using contextual retrieval.
+        """Generate and store embeddings for chunks with batching and rate limiting.
 
         Embeds each chunk with its contextual information (page title, heading path)
-        to improve retrieval quality. The embedding captures the broader context,
-        but only the original chunk content is stored in the database.
+        to improve retrieval quality. Processes in batches with retry logic for
+        rate limit errors.
 
         Args:
             conn: Database connection.
             chunks: List of chunk dicts with 'content' and 'heading_path'.
             chunk_ids: List of chunk IDs in database.
-            page_title: Title of the page for contextual embedding.
+            page_title: Optional page title for contextual embedding.
         """
-        try:
-            texts = [build_contextual_text(c, page_title) for c in chunks]
-            embeddings = self.vector_client.get_embeddings_batch(texts)
+        if not chunks:
+            return
 
-            for chunk_id, embedding in zip(chunk_ids, embeddings):
-                update_chunk_embedding(conn, chunk_id, embedding)
+        batch_size = config.EMBEDDING_BATCH_SIZE
+        batch_delay = config.EMBEDDING_BATCH_DELAY
+        max_retries = config.EMBEDDING_MAX_RETRIES
+        total = len(chunks)
+        embedded_count = 0
 
-            logger.info(f"Generated {len(embeddings)} embeddings with contextual retrieval")
+        # Process chunks in batches
+        for i in range(0, total, batch_size):
+            batch_chunks = chunks[i:i + batch_size]
+            batch_ids = chunk_ids[i:i + batch_size]
+            texts = [self._build_contextual_text(c, page_title) for c in batch_chunks]
 
-        except Exception as e:
-            logger.warning(f"Failed to generate embeddings: {e}")
+            # Retry with exponential backoff on rate limit errors
+            for attempt in range(max_retries):
+                try:
+                    embeddings = self.vector_client.get_embeddings_batch(texts)
+                    for chunk_id, embedding in zip(batch_ids, embeddings):
+                        update_chunk_embedding(conn, chunk_id, embedding)
+                    embedded_count += len(embeddings)
+                    break
+
+                except APIError as e:
+                    is_rate_limit = e.status_code == 429
+                    can_retry = attempt < max_retries - 1
+
+                    if is_rate_limit and can_retry:
+                        delay = 2 ** attempt
+                        logger.warning(f"Rate limited, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(delay)
+                    else:
+                        logger.warning(f"Failed to embed batch starting at {i}: {e}")
+                        break
+
+                except Exception as e:
+                    logger.warning(f"Failed to embed batch starting at {i}: {e}")
+                    break
+
+            # Progress logging for large jobs
+            if total > batch_size:
+                logger.info(f"Embedded {embedded_count}/{total} chunks")
+
+            # Rate limit delay between batches
+            if i + batch_size < total and batch_delay > 0:
+                time.sleep(batch_delay)
+
+        logger.info(f"Generated {embedded_count} embeddings")
+
+    def _build_contextual_text(self, chunk: Dict[str, Any],
+                               page_title: Optional[str] = None) -> str:
+        """Build contextual text for embedding a chunk.
+
+        Prepends page title and heading path to the chunk content so that
+        embeddings capture broader context.
+
+        Args:
+            chunk: Chunk dict with 'content' and optionally 'heading_path'.
+            page_title: Title of the page containing this chunk.
+
+        Returns:
+            Contextual text string ready for embedding.
+        """
+        parts = []
+
+        if page_title:
+            parts.append(f"Document: {page_title}")
+
+        heading_path = chunk.get('heading_path', '')
+        if heading_path:
+            parts.append(f"Section: {heading_path}")
+
+        if parts:
+            parts.append('')
+
+        parts.append(chunk['content'])
+        return '\n'.join(parts)
 
     def index_pages(self, pages: List[Dict[str, Any]]) -> List[Optional[int]]:
         """Index multiple pages.
