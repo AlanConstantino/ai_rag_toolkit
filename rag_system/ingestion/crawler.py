@@ -406,7 +406,7 @@ class Crawler:
                     }
                 )
                 with urllib.request.urlopen(request, timeout=30) as response:
-                    content = response.read().decode('utf-8', errors='ignore')
+                    content = response.read().decode('utf-8', errors='replace')
                     status = response.status
 
                 # Cache the response

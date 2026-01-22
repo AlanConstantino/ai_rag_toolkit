@@ -4,11 +4,18 @@ Provides command-line interface for interacting with the RAG system.
 """
 
 import argparse
+import hashlib
+import os
 from typing import Dict, List, Any, Tuple, Optional
 
 from rag_system import config
-from rag_system.database import init_db, get_connection
-from rag_system.api_client import VectorAPIClient, ChatAPIClient
+from rag_system.database import (
+    init_db, get_connection, cache_query, get_cached_query, log_query
+)
+from rag_system.api_client import (
+    VectorAPIClient, ChatAPIClient,
+    create_openai_vector_client, create_openai_chat_client
+)
 from rag_system.search.bm25_search import BM25Search
 from rag_system.search.vector_search import VectorSearch
 from rag_system.search.hybrid_search import HybridSearch
@@ -149,10 +156,21 @@ class RAGSystem:
 
         Args:
             db_path: Path to SQLite database.
-            vector_client: Optional vector API client.
-            chat_client: Optional chat API client.
+            vector_client: Optional vector API client. If None and OPENAI_API_KEY
+                is set, an OpenAI client will be created automatically.
+            chat_client: Optional chat API client. If None and OPENAI_API_KEY
+                is set, an OpenAI client will be created automatically.
         """
         self.db_path = db_path or config.DATABASE_PATH
+
+        # Auto-create OpenAI clients if API key is available and no clients provided
+        if vector_client is None and chat_client is None:
+            api_key = os.environ.get('OPENAI_API_KEY')
+            if api_key:
+                logger.info("Using OpenAI API for embeddings and chat")
+                vector_client = create_openai_vector_client()
+                chat_client = create_openai_chat_client()
+
         self.vector_client = vector_client
         self.chat_client = chat_client
 
@@ -185,11 +203,27 @@ class RAGSystem:
         """
         top_k = top_k or config.TOP_K_FINAL
 
-        # Classify query
-        query_type = self.classifier.classify(question)
+        # Generate query hash for caching
+        query_hash = hashlib.md5(question.lower().strip().encode()).hexdigest()
 
-        # Expand query
-        expanded = self.expander.expand(question)
+        # Check cache for query processing results
+        conn = get_connection(self.db_path)
+        cached = None
+        try:
+            cached = get_cached_query(conn, query_hash)
+        finally:
+            conn.close()
+
+        if cached:
+            query_type = cached.get('query_type', 'factual')
+            import json
+            expanded = json.loads(cached.get('expanded_queries', '[]')) or [question]
+            logger.info(f"Using cached query processing for: {question[:50]}...")
+        else:
+            # Classify query
+            query_type = self.classifier.classify(question)
+            # Expand query
+            expanded = self.expander.expand(question)
 
         # Search - use BM25 only if no vector client, otherwise hybrid
         all_results = []
@@ -256,6 +290,32 @@ class RAGSystem:
         else:
             answer = "No relevant information found." if not chunks else \
                      "Answer generation is not configured."
+
+        # Cache query processing if not already cached
+        if not cached:
+            conn = get_connection(self.db_path)
+            try:
+                # Get embedding for caching (use first expanded query)
+                query_embedding = []
+                if self.vector_client and expanded:
+                    try:
+                        query_embedding = self.vector_client.get_embedding(expanded[0])
+                    except Exception:
+                        pass
+                cache_query(conn, query_hash, query_type, expanded, query_embedding)
+            finally:
+                conn.close()
+
+        # Log the query
+        conn = get_connection(self.db_path)
+        try:
+            chunk_ids = [c['id'] for c in chunks]
+            log_query(
+                conn, question, query_type, expanded, chunk_ids,
+                metrics['overall'], bool(chunks and self.chat_client)
+            )
+        finally:
+            conn.close()
 
         return {
             'query': question,

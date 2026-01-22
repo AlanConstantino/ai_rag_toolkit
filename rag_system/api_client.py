@@ -9,6 +9,7 @@ import json
 import os
 import re
 import ssl
+import time
 import urllib.request
 import urllib.error
 from typing import List, Optional, Dict, Any, Union
@@ -55,36 +56,56 @@ def create_ssl_context(ssl_verify: bool, ssl_cert_path: Optional[str]) -> Option
 
 
 def make_http_request(endpoint: str, data: Dict[str, Any], headers: Dict[str, str],
-                      ssl_context: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
+                      ssl_context: Optional[ssl.SSLContext] = None,
+                      max_retries: int = 3) -> Dict[str, Any]:
     """Make an HTTP POST request and return parsed JSON.
+
+    Automatically retries on rate limit (429) errors with exponential backoff.
 
     Args:
         endpoint: API endpoint URL.
         data: Request body data.
         headers: HTTP headers.
         ssl_context: Optional SSL context.
+        max_retries: Maximum number of retries for rate limit errors.
 
     Returns:
         Parsed JSON response.
 
     Raises:
-        APIError: If the request fails.
+        APIError: If the request fails after all retries.
     """
     body = json.dumps(data).encode('utf-8')
-    request = urllib.request.Request(endpoint, data=body, headers=headers, method='POST')
 
-    try:
-        with urllib.request.urlopen(request, context=ssl_context) as response:
-            response_data = response.read().decode('utf-8')
-            return json.loads(response_data)
-    except urllib.error.HTTPError as e:
-        raise APIError(
-            f"API request failed: {e.reason}",
-            status_code=e.code,
-            response=e.read().decode('utf-8') if e.fp else None
-        )
-    except urllib.error.URLError as e:
-        raise APIError(f"API request failed: {e.reason}")
+    for attempt in range(max_retries + 1):
+        request = urllib.request.Request(endpoint, data=body, headers=headers, method='POST')
+
+        try:
+            with urllib.request.urlopen(request, context=ssl_context) as response:
+                response_data = response.read().decode('utf-8')
+                return json.loads(response_data)
+        except urllib.error.HTTPError as e:
+            # Handle rate limiting with retry
+            if e.code == 429 and attempt < max_retries:
+                # Try to get Retry-After header, default to exponential backoff
+                retry_after = e.headers.get('Retry-After')
+                if retry_after:
+                    try:
+                        delay = int(retry_after)
+                    except ValueError:
+                        delay = 2 ** attempt
+                else:
+                    delay = 2 ** attempt
+                time.sleep(delay)
+                continue
+
+            raise APIError(
+                f"API request failed: {e.reason}",
+                status_code=e.code,
+                response=e.read().decode('utf-8') if e.fp else None
+            )
+        except urllib.error.URLError as e:
+            raise APIError(f"API request failed: {e.reason}")
 
 
 class VectorAPIClient:
