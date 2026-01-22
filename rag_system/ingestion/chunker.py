@@ -11,25 +11,106 @@ from rag_system import config
 
 
 # =============================================================================
+# Token Estimation
+# =============================================================================
+
+def estimate_token_count(text: str) -> int:
+    """Estimate the number of tokens in a text string.
+
+    Uses a simple heuristic based on word boundaries and punctuation.
+    This provides a reasonable approximation without requiring external
+    tokenizer libraries like tiktoken.
+
+    Heuristic: Split on whitespace and common punctuation patterns to
+    approximate how LLM tokenizers split text. Most tokenizers split on
+    whitespace, punctuation, and within long words.
+
+    Args:
+        text: Text to estimate tokens for.
+
+    Returns:
+        Estimated token count.
+    """
+    if not text or not text.strip():
+        return 0
+
+    words = text.split()
+    punctuation = '.,!?;:\'"()[]{}/<>-_@#$%^&*+=~`|'
+    token_count = 0
+
+    for word in words:
+        if not word:
+            continue
+
+        # Each word is at least one token
+        token_count += 1
+
+        # Count punctuation at both ends of the word
+        # Common patterns: "hello," -> 2 tokens, "world!" -> 2 tokens
+        punct_count = 0
+        for char in word:
+            if char in punctuation:
+                punct_count += 1
+            else:
+                break
+
+        for char in reversed(word):
+            if char in punctuation:
+                punct_count += 1
+            else:
+                break
+
+        # Add punctuation tokens (but avoid double-counting all-punctuation words)
+        if punct_count < len(word):
+            token_count += punct_count
+
+        # Long words often get split by tokenizers
+        # Add approximately 1 token per 5 characters beyond 10
+        word_no_punct = word.strip(punctuation)
+        if len(word_no_punct) > 10:
+            token_count += (len(word_no_punct) - 10) // 5
+
+    return token_count
+
+
+# =============================================================================
 # Basic Text Chunking
 # =============================================================================
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100,
+               use_tokens: bool = False) -> List[str]:
     """Split text into chunks with overlap.
 
     Attempts to break at sentence boundaries when possible.
 
     Args:
         text: Text to chunk.
-        chunk_size: Target size for each chunk in characters.
-        overlap: Number of characters to overlap between chunks.
+        chunk_size: Target size for each chunk (characters or tokens).
+        overlap: Amount to overlap between chunks (characters or tokens).
+        use_tokens: If True, chunk_size and overlap are in tokens, not characters.
 
     Returns:
         List of text chunks.
     """
-    if not text or len(text) <= chunk_size:
-        return [text] if text else []
+    if not text:
+        return []
 
+    # For token mode, check size differently
+    if use_tokens:
+        if estimate_token_count(text) <= chunk_size:
+            return [text]
+    else:
+        if len(text) <= chunk_size:
+            return [text]
+
+    if use_tokens:
+        return _chunk_by_tokens(text, chunk_size, overlap)
+    else:
+        return _chunk_by_characters(text, chunk_size, overlap)
+
+
+def _chunk_by_characters(text: str, chunk_size: int, overlap: int) -> List[str]:
+    """Split text into chunks by character count."""
     chunks = []
     start = 0
 
@@ -38,24 +119,18 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str
 
         # If we're not at the end, try to find a good break point
         if end < len(text):
-            # Look for sentence boundaries within the chunk
-            chunk_text = text[start:end]
+            candidate_chunk = text[start:end]
 
             # Find the last sentence boundary
-            last_period = max(
-                chunk_text.rfind('. '),
-                chunk_text.rfind('! '),
-                chunk_text.rfind('? '),
-                chunk_text.rfind('.\n'),
-                chunk_text.rfind('!\n'),
-                chunk_text.rfind('?\n')
-            )
+            sentence_markers = ['. ', '! ', '? ', '.\n', '!\n', '?\n']
+            last_sentence = max(candidate_chunk.rfind(marker) for marker in sentence_markers)
 
-            if last_period > chunk_size // 2:  # Only use if past halfway
-                end = start + last_period + 1  # Include the punctuation
+            if last_sentence > chunk_size // 2:
+                # Break at sentence boundary
+                end = start + last_sentence + 1
             else:
-                # Try to break at word boundary
-                last_space = chunk_text.rfind(' ')
+                # Break at word boundary
+                last_space = candidate_chunk.rfind(' ')
                 if last_space > chunk_size // 2:
                     end = start + last_space
 
@@ -65,6 +140,57 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str
 
         # Move start position, accounting for overlap
         start = end - overlap if end < len(text) else len(text)
+
+    return chunks
+
+
+def _chunk_by_tokens(text: str, max_tokens: int, overlap_tokens: int) -> List[str]:
+    """Split text into chunks by token count.
+
+    Uses word-level splitting with token estimation to create chunks
+    that fit within the token limit while respecting sentence boundaries.
+    """
+    if not text:
+        return []
+
+    words = text.split()
+    if not words:
+        return []
+
+    chunks = []
+    current_chunk_words = []
+    current_token_count = 0
+
+    for word in words:
+        word_tokens = estimate_token_count(word)
+
+        # Check if adding this word would exceed the limit
+        if current_token_count + word_tokens > max_tokens and current_chunk_words:
+            # Save current chunk
+            chunk_text = ' '.join(current_chunk_words)
+            chunks.append(chunk_text)
+
+            # Build overlap from end of current chunk
+            overlap_words = []
+            overlap_count = 0
+            for w in reversed(current_chunk_words):
+                w_tokens = estimate_token_count(w)
+                if overlap_count + w_tokens <= overlap_tokens:
+                    overlap_words.append(w)
+                    overlap_count += w_tokens
+                else:
+                    break
+
+            # Reverse to maintain original order
+            current_chunk_words = list(reversed(overlap_words))
+            current_token_count = overlap_count
+
+        current_chunk_words.append(word)
+        current_token_count += word_tokens
+
+    # Add the last chunk
+    if current_chunk_words:
+        chunks.append(' '.join(current_chunk_words))
 
     return chunks
 
