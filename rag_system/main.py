@@ -10,7 +10,7 @@ from typing import Dict, List, Any, Tuple, Optional
 
 from rag_system import config
 from rag_system.database import (
-    init_db, get_connection, cache_query, get_cached_query, log_query
+    init_db, get_connection, managed_connection, cache_query, get_cached_query, log_query
 )
 from rag_system.api_client import (
     VectorAPIClient, ChatAPIClient,
@@ -19,6 +19,9 @@ from rag_system.api_client import (
 from rag_system.security import (
     validate_query_length_or_raise, ValidationError,
     MAX_QUERY_LENGTH, sanitize_for_logging
+)
+from rag_system.shutdown import (
+    install_shutdown_handlers, register_cleanup, is_shutdown_requested
 )
 from rag_system.search.bm25_search import BM25Search
 from rag_system.search.vector_search import VectorSearch
@@ -450,6 +453,9 @@ def run_interactive(rag: RAGSystem) -> None:
 
 def main() -> None:
     """Main entry point."""
+    # Install graceful shutdown handlers
+    install_shutdown_handlers()
+
     parser = create_parser()
     args = parser.parse_args()
 
@@ -457,27 +463,43 @@ def main() -> None:
         parser.print_help()
         return
 
-    rag = RAGSystem(db_path=args.db)
+    rag = None
+    try:
+        rag = RAGSystem(db_path=args.db)
 
-    if args.command == 'ingest':
-        print(f"Ingesting from {args.url}...")
-        stats = rag.ingest(
-            args.url,
-            max_pages=args.max_pages,
-            ignore_robots=args.ignore_robots
-        )
-        print(f"Crawled {stats['pages_crawled']} pages, indexed {stats['pages_indexed']}, skipped {stats['pages_skipped']}, errors: {stats['errors']}")
+        if args.command == 'ingest':
+            print(f"Ingesting from {args.url}...")
+            try:
+                stats = rag.ingest(
+                    args.url,
+                    max_pages=args.max_pages,
+                    ignore_robots=args.ignore_robots
+                )
+                print(f"Crawled {stats['pages_crawled']} pages, indexed {stats['pages_indexed']}, skipped {stats['pages_skipped']}, errors: {stats['errors']}")
+            except KeyboardInterrupt:
+                print("\nIngestion interrupted. Partial data may have been indexed.")
+                logger.info("Ingestion interrupted by user")
 
-    elif args.command == 'query':
-        result = rag.query(args.question, top_k=args.top_k)
-        print(format_query_result(result))
+        elif args.command == 'query':
+            result = rag.query(args.question, top_k=args.top_k)
+            print(format_query_result(result))
 
-    elif args.command == 'stats':
-        stats = rag.get_stats()
-        print(format_stats(stats))
+        elif args.command == 'stats':
+            stats = rag.get_stats()
+            print(format_stats(stats))
 
-    elif args.command == 'interactive':
-        run_interactive(rag)
+        elif args.command == 'interactive':
+            run_interactive(rag)
+
+    except KeyboardInterrupt:
+        print("\nShutdown requested")
+        logger.info("Shutdown requested via keyboard interrupt")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        raise
+    finally:
+        # Cleanup will be handled by atexit handlers
+        logger.debug("Main function cleanup complete")
 
 
 if __name__ == '__main__':

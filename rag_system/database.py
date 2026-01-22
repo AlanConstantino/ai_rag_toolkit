@@ -291,6 +291,39 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 
 
 @contextmanager
+def managed_connection(db_path: str) -> Generator[sqlite3.Connection, None, None]:
+    """Context manager for database connections that ensures cleanup.
+
+    Automatically closes the connection when the context exits, regardless
+    of whether an exception occurred.
+
+    Args:
+        db_path: Path to the SQLite database file.
+
+    Yields:
+        Database connection.
+
+    Raises:
+        ConnectionError: If connection fails.
+
+    Example:
+        with managed_connection(db_path) as conn:
+            # Use connection
+            pass  # Connection automatically closed
+    """
+    conn = None
+    try:
+        conn = get_connection(db_path)
+        yield conn
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass  # Ignore errors during close
+
+
+@contextmanager
 def transaction(conn: sqlite3.Connection) -> Generator[sqlite3.Connection, None, None]:
     """Context manager for database transactions.
 
