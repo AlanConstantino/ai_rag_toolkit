@@ -151,6 +151,17 @@ EMBEDDING_MAX_RETRIES: int = int(os.environ.get('RAG_EMBEDDING_MAX_RETRIES', '3'
 
 HTTP_CACHE_DIR: Optional[str] = os.environ.get('RAG_HTTP_CACHE_DIR', None)
 
+# =============================================================================
+# Logging and Metrics Configuration
+# =============================================================================
+
+# Log format: 'text' for human-readable, 'json' for structured
+LOG_FORMAT: str = os.environ.get('RAG_LOG_FORMAT', 'text')
+LOG_LEVEL: str = os.environ.get('RAG_LOG_LEVEL', 'INFO')
+
+# Enable metrics collection
+METRICS_ENABLED: bool = os.environ.get('RAG_METRICS_ENABLED', 'true').lower() in ('true', '1', 'yes')
+
 
 # =============================================================================
 # Configuration Validation

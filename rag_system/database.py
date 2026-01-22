@@ -228,7 +228,14 @@ CREATE TABLE IF NOT EXISTS query_log (
     retrieved_chunk_ids TEXT,
     confidence_score REAL,
     answer_generated BOOLEAN,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Timing metrics (in seconds)
+    total_time_ms REAL,
+    embedding_time_ms REAL,
+    search_time_ms REAL,
+    rerank_time_ms REAL,
+    generation_time_ms REAL,
+    metrics_json TEXT
 );
 
 -- ============================================
@@ -1111,8 +1118,9 @@ def get_cached_query(conn: sqlite3.Connection,
 def log_query(conn: sqlite3.Connection, query: str, query_type: str,
               expanded_queries: List[str], retrieved_chunk_ids: List[int],
               confidence_score: float, answer_generated: bool,
-              auto_commit: bool = True) -> int:
-    """Log a query execution.
+              auto_commit: bool = True,
+              metrics: Optional[Dict[str, float]] = None) -> int:
+    """Log a query execution with optional timing metrics.
 
     Args:
         conn: Database connection.
@@ -1123,6 +1131,8 @@ def log_query(conn: sqlite3.Connection, query: str, query_type: str,
         confidence_score: Confidence score.
         answer_generated: Whether an answer was generated.
         auto_commit: If True, commit after insert.
+        metrics: Optional dict of timing metrics (in seconds).
+            Keys: total_time, embedding_time, search_time, rerank_time, generation_time
 
     Returns:
         The ID of the log entry.
@@ -1130,14 +1140,33 @@ def log_query(conn: sqlite3.Connection, query: str, query_type: str,
     Raises:
         QueryError: If logging fails.
     """
+    # Convert metrics from seconds to milliseconds for storage
+    total_time_ms = None
+    embedding_time_ms = None
+    search_time_ms = None
+    rerank_time_ms = None
+    generation_time_ms = None
+    metrics_json = None
+
+    if metrics:
+        total_time_ms = metrics.get('total_time', 0) * 1000 if metrics.get('total_time') else None
+        embedding_time_ms = metrics.get('embedding_time', 0) * 1000 if metrics.get('embedding_time') else None
+        search_time_ms = metrics.get('search_time', 0) * 1000 if metrics.get('search_time') else None
+        rerank_time_ms = metrics.get('rerank_time', 0) * 1000 if metrics.get('rerank_time') else None
+        generation_time_ms = metrics.get('generation_time', 0) * 1000 if metrics.get('generation_time') else None
+        metrics_json = json.dumps(metrics)
+
     try:
         cursor = conn.execute(
             """INSERT INTO query_log
                (query, query_type, expanded_queries, retrieved_chunk_ids,
-                confidence_score, answer_generated)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                confidence_score, answer_generated, total_time_ms, embedding_time_ms,
+                search_time_ms, rerank_time_ms, generation_time_ms, metrics_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (query, query_type, json.dumps(expanded_queries),
-             json.dumps(retrieved_chunk_ids), confidence_score, answer_generated)
+             json.dumps(retrieved_chunk_ids), confidence_score, answer_generated,
+             total_time_ms, embedding_time_ms, search_time_ms, rerank_time_ms,
+             generation_time_ms, metrics_json)
         )
         if auto_commit:
             conn.commit()
@@ -1163,3 +1192,171 @@ def get_query_logs(conn: sqlite3.Connection,
         "SELECT * FROM query_log ORDER BY timestamp DESC LIMIT ?", (limit,)
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+# =============================================================================
+# Schema Migration
+# =============================================================================
+
+def migrate_query_log_timing(conn: sqlite3.Connection,
+                              auto_commit: bool = True) -> bool:
+    """Add timing columns to query_log table if they don't exist.
+
+    This migration adds performance metrics columns to existing databases.
+
+    Args:
+        conn: Database connection.
+        auto_commit: If True, commit after migration.
+
+    Returns:
+        True if migration was applied, False if already migrated.
+
+    Raises:
+        QueryError: If migration fails.
+    """
+    # Check if columns already exist
+    cursor = conn.execute("PRAGMA table_info(query_log)")
+    columns = {row['name'] for row in cursor.fetchall()}
+
+    if 'total_time_ms' in columns:
+        return False  # Already migrated
+
+    migration_columns = [
+        ('total_time_ms', 'REAL'),
+        ('embedding_time_ms', 'REAL'),
+        ('search_time_ms', 'REAL'),
+        ('rerank_time_ms', 'REAL'),
+        ('generation_time_ms', 'REAL'),
+        ('metrics_json', 'TEXT'),
+    ]
+
+    try:
+        for col_name, col_type in migration_columns:
+            if col_name not in columns:
+                conn.execute(
+                    f"ALTER TABLE query_log ADD COLUMN {col_name} {col_type}"
+                )
+        if auto_commit:
+            conn.commit()
+        return True
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to migrate query_log table: {e}") from e
+
+
+# =============================================================================
+# Analytics Export
+# =============================================================================
+
+def get_query_analytics(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Get analytics data from query logs.
+
+    Returns aggregated statistics about query performance.
+
+    Args:
+        conn: Database connection.
+
+    Returns:
+        Dict containing analytics data.
+    """
+    analytics: Dict[str, Any] = {
+        'total_queries': 0,
+        'queries_with_answers': 0,
+        'avg_confidence': 0.0,
+        'query_types': {},
+        'timing': {
+            'avg_total_ms': None,
+            'avg_embedding_ms': None,
+            'avg_search_ms': None,
+            'avg_rerank_ms': None,
+            'avg_generation_ms': None,
+        }
+    }
+
+    # Total queries and answers generated
+    cursor = conn.execute(
+        "SELECT COUNT(*) as total, SUM(CASE WHEN answer_generated THEN 1 ELSE 0 END) as with_answers FROM query_log"
+    )
+    row = cursor.fetchone()
+    if row:
+        analytics['total_queries'] = row['total'] or 0
+        analytics['queries_with_answers'] = row['with_answers'] or 0
+
+    # Average confidence
+    cursor = conn.execute(
+        "SELECT AVG(confidence_score) as avg_conf FROM query_log WHERE confidence_score IS NOT NULL"
+    )
+    row = cursor.fetchone()
+    if row and row['avg_conf'] is not None:
+        analytics['avg_confidence'] = round(row['avg_conf'], 4)
+
+    # Query type distribution
+    cursor = conn.execute(
+        "SELECT query_type, COUNT(*) as count FROM query_log WHERE query_type IS NOT NULL GROUP BY query_type"
+    )
+    for row in cursor.fetchall():
+        analytics['query_types'][row['query_type']] = row['count']
+
+    # Timing averages
+    cursor = conn.execute("""
+        SELECT
+            AVG(total_time_ms) as avg_total,
+            AVG(embedding_time_ms) as avg_embedding,
+            AVG(search_time_ms) as avg_search,
+            AVG(rerank_time_ms) as avg_rerank,
+            AVG(generation_time_ms) as avg_generation
+        FROM query_log
+        WHERE total_time_ms IS NOT NULL
+    """)
+    row = cursor.fetchone()
+    if row:
+        analytics['timing']['avg_total_ms'] = round(row['avg_total'], 2) if row['avg_total'] else None
+        analytics['timing']['avg_embedding_ms'] = round(row['avg_embedding'], 2) if row['avg_embedding'] else None
+        analytics['timing']['avg_search_ms'] = round(row['avg_search'], 2) if row['avg_search'] else None
+        analytics['timing']['avg_rerank_ms'] = round(row['avg_rerank'], 2) if row['avg_rerank'] else None
+        analytics['timing']['avg_generation_ms'] = round(row['avg_generation'], 2) if row['avg_generation'] else None
+
+    return analytics
+
+
+def export_query_logs_csv(conn: sqlite3.Connection, filepath: str,
+                          limit: Optional[int] = None) -> int:
+    """Export query logs to a CSV file.
+
+    Args:
+        conn: Database connection.
+        filepath: Path to output CSV file.
+        limit: Optional maximum number of rows to export.
+
+    Returns:
+        Number of rows exported.
+
+    Raises:
+        QueryError: If export fails.
+    """
+    import csv
+
+    try:
+        query = "SELECT * FROM query_log ORDER BY timestamp DESC"
+        if limit:
+            query += f" LIMIT {limit}"
+
+        cursor = conn.execute(query)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return 0
+
+        # Get column names
+        column_names = [description[0] for description in cursor.description]
+
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(column_names)
+            for row in rows:
+                writer.writerow([row[col] for col in column_names])
+
+        return len(rows)
+    except (sqlite3.Error, IOError) as e:
+        raise QueryError(f"Failed to export query logs: {e}") from e
