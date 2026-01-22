@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 from rag_system.utils import get_logger
+from rag_system import config
 
 logger = get_logger(__name__)
 
@@ -368,7 +369,8 @@ class Crawler:
     def _fetch_url(self, url: str) -> tuple:
         """Fetch a URL and return its content.
 
-        Checks cache first if caching is enabled.
+        Checks cache first if caching is enabled. Retries on transient errors
+        (5xx status codes and timeouts) with exponential backoff.
 
         Args:
             url: URL to fetch.
@@ -377,7 +379,8 @@ class Crawler:
             Tuple of (content, status_code).
 
         Raises:
-            urllib.error.HTTPError: If the request fails.
+            urllib.error.HTTPError: If the request fails after all retries.
+            urllib.error.URLError: If the connection fails after all retries.
         """
         # Check cache first
         if self.cache_dir:
@@ -388,26 +391,57 @@ class Crawler:
                     cached = json.load(f)
                     return cached['content'], cached['status']
 
-        # Fetch from network
-        request = urllib.request.Request(
-            url,
-            headers={
-                'User-Agent': self.USER_AGENT,
-                'Accept': 'text/html,application/xhtml+xml',
-            }
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            content = response.read().decode('utf-8', errors='ignore')
-            status = response.status
+        max_retries = config.CRAWLER_MAX_RETRIES
+        base_delay = config.CRAWLER_RETRY_DELAY
+        retry_codes = config.CRAWLER_RETRY_STATUS_CODES
 
-        # Cache the response
-        if self.cache_dir:
-            cache_path = self._get_cache_path(url)
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump({'url': url, 'content': content, 'status': status}, f)
-            logger.info(f"Cached: {url}")
+        for attempt in range(max_retries + 1):
+            try:
+                # Fetch from network
+                request = urllib.request.Request(
+                    url,
+                    headers={
+                        'User-Agent': self.USER_AGENT,
+                        'Accept': 'text/html,application/xhtml+xml',
+                    }
+                )
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    content = response.read().decode('utf-8', errors='ignore')
+                    status = response.status
 
-        return content, status
+                # Cache the response
+                if self.cache_dir:
+                    cache_path = self._get_cache_path(url)
+                    with open(cache_path, 'w', encoding='utf-8') as f:
+                        json.dump({'url': url, 'content': content, 'status': status}, f)
+                    logger.info(f"Cached: {url}")
+
+                return content, status
+
+            except urllib.error.HTTPError as e:
+                # Only retry on configured status codes
+                should_retry = e.code in retry_codes and attempt < max_retries
+                if not should_retry:
+                    raise
+
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"HTTP {e.code} for {url}, retrying in {delay}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
+
+            except urllib.error.URLError as e:
+                # Retry on timeout and connection errors
+                if attempt >= max_retries:
+                    raise
+
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"URL error for {url}: {e.reason}, retrying in {delay}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
 
     def _is_html_content(self, url: str) -> bool:
         """Check if URL likely points to HTML content.

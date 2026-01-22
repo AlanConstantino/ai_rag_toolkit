@@ -67,6 +67,15 @@ EXCLUDED_PATHS = [p.strip() for p in _excluded_paths.split(',') if p.strip()]
 _included_paths = os.environ.get('RAG_INCLUDED_PATHS', '')
 INCLUDED_PATHS = [p.strip() for p in _included_paths.split(',') if p.strip()] if _included_paths else None
 
+# Retry settings for transient errors
+CRAWLER_MAX_RETRIES = int(os.environ.get('RAG_CRAWLER_MAX_RETRIES', '3'))
+CRAWLER_RETRY_DELAY = float(os.environ.get('RAG_CRAWLER_RETRY_DELAY', '1.0'))
+CRAWLER_RETRY_STATUS_CODES = [
+    int(code.strip())
+    for code in os.environ.get('RAG_CRAWLER_RETRY_STATUS_CODES', '500,502,503,504').split(',')
+    if code.strip()
+]
+
 # =============================================================================
 # Main Content Detection
 # =============================================================================
@@ -91,9 +100,16 @@ MAIN_CONTENT_SELECTORS = [
 # Chunking Settings
 # =============================================================================
 
+# Character-based chunk sizes
 SMALL_CHUNK_SIZE = int(os.environ.get('RAG_SMALL_CHUNK_SIZE', '500'))
 LARGE_CHUNK_SIZE = int(os.environ.get('RAG_LARGE_CHUNK_SIZE', '2000'))
 CHUNK_OVERLAP = int(os.environ.get('RAG_CHUNK_OVERLAP', '100'))
+
+# Token-based chunk sizes
+USE_TOKEN_CHUNKING = os.environ.get('RAG_USE_TOKEN_CHUNKING', 'false').lower() in ('true', '1', 'yes')
+SMALL_CHUNK_TOKENS = int(os.environ.get('RAG_SMALL_CHUNK_TOKENS', '128'))
+LARGE_CHUNK_TOKENS = int(os.environ.get('RAG_LARGE_CHUNK_TOKENS', '512'))
+CHUNK_OVERLAP_TOKENS = int(os.environ.get('RAG_CHUNK_OVERLAP_TOKENS', '25'))
 
 # =============================================================================
 # Search Settings
@@ -113,3 +129,17 @@ MAX_CHUNKS_PER_PAGE = int(os.environ.get('RAG_MAX_CHUNKS_PER_PAGE', '2'))
 
 MIN_CONFIDENCE_SCORE = int(os.environ.get('RAG_MIN_CONFIDENCE_SCORE', '3'))
 CONFIDENCE_THRESHOLD = float(os.environ.get('RAG_CONFIDENCE_THRESHOLD', '0.5'))
+
+# =============================================================================
+# Embedding Settings
+# =============================================================================
+
+EMBEDDING_BATCH_SIZE = int(os.environ.get('RAG_EMBEDDING_BATCH_SIZE', '100'))
+EMBEDDING_BATCH_DELAY = float(os.environ.get('RAG_EMBEDDING_BATCH_DELAY', '0.1'))
+EMBEDDING_MAX_RETRIES = int(os.environ.get('RAG_EMBEDDING_MAX_RETRIES', '3'))
+
+# =============================================================================
+# HTTP Cache Configuration
+# =============================================================================
+
+HTTP_CACHE_DIR = os.environ.get('RAG_HTTP_CACHE_DIR', None)
