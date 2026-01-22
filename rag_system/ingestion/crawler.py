@@ -20,6 +20,7 @@ from pathlib import Path
 
 from rag_system.utils import get_logger
 from rag_system import config
+from rag_system.shutdown import is_shutdown_requested
 
 logger = get_logger(__name__)
 
@@ -922,6 +923,11 @@ class Crawler:
         pages_crawled = 0
 
         while self.queue and pages_crawled < self.max_pages:
+            # Check for shutdown request
+            if is_shutdown_requested():
+                logger.info("Shutdown requested, stopping crawl...")
+                break
+
             url = self.queue.pop(0)
 
             # Skip if already visited or shouldn't crawl
