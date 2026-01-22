@@ -10,7 +10,8 @@ from typing import Dict, List, Any, Tuple, Optional
 
 from rag_system import config
 from rag_system.database import (
-    init_db, get_connection, managed_connection, cache_query, get_cached_query, log_query
+    init_db, get_connection, managed_connection, cache_query, get_cached_query, log_query,
+    get_query_analytics, export_query_logs_csv, migrate_query_log_timing
 )
 from rag_system.api_client import (
     VectorAPIClient, ChatAPIClient,
@@ -34,9 +35,10 @@ from rag_system.query.expander import QueryExpander
 from rag_system.query.confidence import ConfidenceAnalyzer
 from rag_system.query.context_builder import ContextBuilder
 from rag_system.query.answer_generator import AnswerGenerator
-from rag_system.utils import get_logger
+from rag_system.utils import get_logger, get_metrics_collector, Timer
 
 logger = get_logger(__name__)
+metrics_collector = get_metrics_collector()
 
 
 def parse_command(input_str: str) -> Tuple[str, List[str]]:
@@ -102,6 +104,21 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Health command
     subparsers.add_parser('health', help='Check system health')
+
+    # Analytics command
+    analytics_parser = subparsers.add_parser('analytics', help='Show query analytics')
+    analytics_parser.add_argument(
+        '--export', type=str, metavar='FILE',
+        help='Export query logs to CSV file'
+    )
+    analytics_parser.add_argument(
+        '--limit', type=int, default=None,
+        help='Limit number of rows to export'
+    )
+    analytics_parser.add_argument(
+        '--json', action='store_true',
+        help='Output analytics as JSON'
+    )
 
     return parser
 
@@ -210,11 +227,15 @@ class RAGSystem:
             top_k: Number of results.
 
         Returns:
-            Result dict with answer, chunks, confidence.
+            Result dict with answer, chunks, confidence, and timing metrics.
 
         Raises:
             ValidationError: If query exceeds maximum length.
         """
+        import time
+        query_start_time = time.time()
+        timing_metrics: Dict[str, float] = {}
+
         # Validate query length for security
         validate_query_length_or_raise(question)
 
@@ -244,18 +265,30 @@ class RAGSystem:
 
         # Search - use BM25 only if no vector client, otherwise hybrid
         all_results = []
+        embedding_start = time.time()
+        search_start = time.time()
+
         for q in expanded:
             if self.vector_client:
                 # Get embedding and do hybrid search
                 try:
+                    embed_start = time.time()
                     query_embedding = self.vector_client.get_embedding(q)
+                    timing_metrics['embedding_time'] = timing_metrics.get('embedding_time', 0) + (time.time() - embed_start)
+
+                    search_op_start = time.time()
                     results = self.hybrid_search.search(query_embedding, q)
+                    timing_metrics['search_time'] = timing_metrics.get('search_time', 0) + (time.time() - search_op_start)
                 except Exception as e:
                     logger.warning(f"Vector search failed, falling back to BM25: {e}")
+                    search_op_start = time.time()
                     results = self.bm25_search.search(q)
+                    timing_metrics['search_time'] = timing_metrics.get('search_time', 0) + (time.time() - search_op_start)
             else:
                 # BM25 only
+                search_op_start = time.time()
                 results = self.bm25_search.search(q)
+                timing_metrics['search_time'] = timing_metrics.get('search_time', 0) + (time.time() - search_op_start)
             all_results.extend(results)
 
         # Deduplicate by chunk_id
@@ -267,7 +300,9 @@ class RAGSystem:
                 unique_results.append((chunk_id, score))
 
         # Rerank
+        rerank_start = time.time()
         reranked = self.reranker.rerank(unique_results, question)
+        timing_metrics['rerank_time'] = time.time() - rerank_start
 
         # Diversify
         diversified = self.diversifier.diversify(reranked, top_k=top_k)
@@ -296,6 +331,7 @@ class RAGSystem:
         metrics = self.confidence_analyzer.analyze(question, chunks)
 
         # Build context and generate answer
+        generation_start = time.time()
         if chunks and self.chat_client:
             context = self.context_builder.build_context(chunks)
             answer_result = self.answer_generator.generate_with_confidence(
@@ -304,6 +340,7 @@ class RAGSystem:
             answer = answer_result['answer']
             if answer_result.get('disclaimer'):
                 answer = f"{answer}\n\n{answer_result['disclaimer']}"
+            timing_metrics['generation_time'] = time.time() - generation_start
         else:
             answer = "No relevant information found." if not chunks else \
                      "Answer generation is not configured."
@@ -323,16 +360,24 @@ class RAGSystem:
             finally:
                 conn.close()
 
-        # Log the query
+        # Calculate total time
+        timing_metrics['total_time'] = time.time() - query_start_time
+
+        # Log the query with timing metrics
         conn = get_connection(self.db_path)
         try:
             chunk_ids = [c['id'] for c in chunks]
             log_query(
                 conn, question, query_type, expanded, chunk_ids,
-                metrics['overall'], bool(chunks and self.chat_client)
+                metrics['overall'], bool(chunks and self.chat_client),
+                metrics=timing_metrics
             )
         finally:
             conn.close()
+
+        # Record metrics to global collector
+        for name, value in timing_metrics.items():
+            metrics_collector.record(name, value)
 
         return {
             'query': question,
@@ -340,7 +385,8 @@ class RAGSystem:
             'answer': answer,
             'chunks': chunks,
             'confidence': metrics['overall'],
-            'metrics': metrics
+            'metrics': metrics,
+            'timing': timing_metrics
         }
 
     def ingest(self, start_url: str, max_pages: int = None,
@@ -508,6 +554,48 @@ def main() -> None:
             if not result['healthy']:
                 import sys
                 sys.exit(1)
+
+        elif args.command == 'analytics':
+            import json as json_module
+            conn = get_connection(args.db)
+            try:
+                # Run schema migration for timing columns
+                migrate_query_log_timing(conn)
+
+                if args.export:
+                    # Export to CSV
+                    count = export_query_logs_csv(conn, args.export, args.limit)
+                    print(f"Exported {count} query logs to {args.export}")
+                else:
+                    # Show analytics
+                    analytics = get_query_analytics(conn)
+                    if args.json:
+                        print(json_module.dumps(analytics, indent=2))
+                    else:
+                        print("Query Analytics")
+                        print("=" * 40)
+                        print(f"Total queries: {analytics['total_queries']}")
+                        print(f"Queries with answers: {analytics['queries_with_answers']}")
+                        print(f"Average confidence: {analytics['avg_confidence']:.2%}")
+                        print()
+                        print("Query Types:")
+                        for qtype, count in analytics['query_types'].items():
+                            print(f"  {qtype}: {count}")
+                        print()
+                        print("Timing (average ms):")
+                        timing = analytics['timing']
+                        if timing['avg_total_ms']:
+                            print(f"  Total: {timing['avg_total_ms']:.1f}ms")
+                        if timing['avg_embedding_ms']:
+                            print(f"  Embedding: {timing['avg_embedding_ms']:.1f}ms")
+                        if timing['avg_search_ms']:
+                            print(f"  Search: {timing['avg_search_ms']:.1f}ms")
+                        if timing['avg_rerank_ms']:
+                            print(f"  Rerank: {timing['avg_rerank_ms']:.1f}ms")
+                        if timing['avg_generation_ms']:
+                            print(f"  Generation: {timing['avg_generation_ms']:.1f}ms")
+            finally:
+                conn.close()
 
     except KeyboardInterrupt:
         print("\nShutdown requested")
