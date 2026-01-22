@@ -23,6 +23,7 @@ from rag_system.security import (
 from rag_system.shutdown import (
     install_shutdown_handlers, register_cleanup, is_shutdown_requested
 )
+from rag_system.health import HealthChecker, format_health_report
 from rag_system.search.bm25_search import BM25Search
 from rag_system.search.vector_search import VectorSearch
 from rag_system.search.hybrid_search import HybridSearch
@@ -98,6 +99,9 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Interactive command
     subparsers.add_parser('interactive', help='Start interactive mode')
+
+    # Health command
+    subparsers.add_parser('health', help='Check system health')
 
     return parser
 
@@ -490,6 +494,20 @@ def main() -> None:
 
         elif args.command == 'interactive':
             run_interactive(rag)
+
+        elif args.command == 'health':
+            checker = HealthChecker(
+                db_path=args.db,
+                vector_client=rag.vector_client,
+                chat_client=rag.chat_client
+            )
+            result = checker.check_all()
+            print(format_health_report(result))
+
+            # Exit with non-zero if unhealthy
+            if not result['healthy']:
+                import sys
+                sys.exit(1)
 
     except KeyboardInterrupt:
         print("\nShutdown requested")
