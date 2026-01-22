@@ -16,6 +16,10 @@ from rag_system.api_client import (
     VectorAPIClient, ChatAPIClient,
     create_openai_vector_client, create_openai_chat_client
 )
+from rag_system.security import (
+    validate_query_length_or_raise, ValidationError,
+    MAX_QUERY_LENGTH, sanitize_for_logging
+)
 from rag_system.search.bm25_search import BM25Search
 from rag_system.search.vector_search import VectorSearch
 from rag_system.search.hybrid_search import HybridSearch
@@ -200,7 +204,13 @@ class RAGSystem:
 
         Returns:
             Result dict with answer, chunks, confidence.
+
+        Raises:
+            ValidationError: If query exceeds maximum length.
         """
+        # Validate query length for security
+        validate_query_length_or_raise(question)
+
         top_k = top_k or config.TOP_K_FINAL
 
         # Generate query hash for caching
@@ -218,7 +228,7 @@ class RAGSystem:
             query_type = cached.get('query_type', 'factual')
             import json
             expanded = json.loads(cached.get('expanded_queries', '[]')) or [question]
-            logger.info(f"Using cached query processing for: {question[:50]}...")
+            logger.info(f"Using cached query processing for: {sanitize_for_logging(question, 50)}")
         else:
             # Classify query
             query_type = self.classifier.classify(question)
