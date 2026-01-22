@@ -35,10 +35,22 @@ from rag_system.query.expander import QueryExpander
 from rag_system.query.confidence import ConfidenceAnalyzer
 from rag_system.query.context_builder import ContextBuilder
 from rag_system.query.answer_generator import AnswerGenerator
-from rag_system.utils import get_logger, get_metrics_collector, Timer
+from rag_system.utils import get_logger, get_metrics_collector, Timer, LRUCache
 
 logger = get_logger(__name__)
 metrics_collector = get_metrics_collector()
+
+# Global query cache instance (initialized lazily by RAGSystem)
+_query_cache: Optional[LRUCache] = None
+
+
+def get_query_cache() -> Optional[LRUCache]:
+    """Get the global query cache instance.
+
+    Returns:
+        LRUCache instance or None if caching is disabled.
+    """
+    return _query_cache
 
 
 def parse_command(input_str: str) -> Tuple[str, List[str]]:
@@ -118,6 +130,17 @@ def create_parser() -> argparse.ArgumentParser:
     analytics_parser.add_argument(
         '--json', action='store_true',
         help='Output analytics as JSON'
+    )
+
+    # Cache command
+    cache_parser = subparsers.add_parser('cache', help='Manage query cache')
+    cache_parser.add_argument(
+        'action', choices=['stats', 'clear'],
+        help='Cache action: stats (show statistics) or clear (clear cache)'
+    )
+    cache_parser.add_argument(
+        '--json', action='store_true',
+        help='Output as JSON'
     )
 
     return parser
@@ -219,12 +242,26 @@ class RAGSystem:
         self.reranker = Reranker(self.db_path)
         self.diversifier = Diversifier(self.db_path)
 
-    def query(self, question: str, top_k: int = None) -> Dict[str, Any]:
+        # Initialize query result cache
+        global _query_cache
+        if config.QUERY_CACHE_ENABLED:
+            _query_cache = LRUCache(
+                max_size=config.QUERY_CACHE_SIZE,
+                ttl_seconds=config.QUERY_CACHE_TTL
+            )
+            logger.info(f"Query cache enabled: size={config.QUERY_CACHE_SIZE}, ttl={config.QUERY_CACHE_TTL}s")
+        else:
+            _query_cache = None
+            logger.info("Query cache disabled")
+
+    def query(self, question: str, top_k: int = None,
+              use_cache: bool = True) -> Dict[str, Any]:
         """Query the system.
 
         Args:
             question: Question to ask.
             top_k: Number of results.
+            use_cache: Whether to use the query result cache.
 
         Returns:
             Result dict with answer, chunks, confidence, and timing metrics.
@@ -243,6 +280,18 @@ class RAGSystem:
 
         # Generate query hash for caching
         query_hash = hashlib.md5(question.lower().strip().encode()).hexdigest()
+
+        # Check query result cache first
+        cache_key = f"{query_hash}:{top_k}"
+        if use_cache and _query_cache is not None:
+            cached_result = _query_cache.get(cache_key)
+            if cached_result is not None:
+                # Add cache hit info to result
+                cached_result = cached_result.copy()
+                cached_result['cache_hit'] = True
+                cached_result['timing'] = {'total_time': time.time() - query_start_time}
+                logger.debug(f"Cache hit for query: {sanitize_for_logging(question, 50)}")
+                return cached_result
 
         # Check cache for query processing results
         conn = get_connection(self.db_path)
@@ -379,15 +428,23 @@ class RAGSystem:
         for name, value in timing_metrics.items():
             metrics_collector.record(name, value)
 
-        return {
+        result = {
             'query': question,
             'query_type': query_type,
             'answer': answer,
             'chunks': chunks,
             'confidence': metrics['overall'],
             'metrics': metrics,
-            'timing': timing_metrics
+            'timing': timing_metrics,
+            'cache_hit': False
         }
+
+        # Store result in cache
+        if use_cache and _query_cache is not None:
+            _query_cache.put(cache_key, result)
+            logger.debug(f"Cached result for query: {sanitize_for_logging(question, 50)}")
+
+        return result
 
     def ingest(self, start_url: str, max_pages: int = None,
                 ignore_robots: bool = False) -> Dict[str, Any]:
@@ -456,6 +513,36 @@ class RAGSystem:
         finally:
             conn.close()
 
+    def get_cache_stats(self) -> Optional[Dict[str, Any]]:
+        """Get query cache statistics.
+
+        Returns:
+            Dict with cache stats, or None if caching is disabled.
+        """
+        if _query_cache is None:
+            return None
+        return _query_cache.get_stats()
+
+    def clear_cache(self) -> bool:
+        """Clear the query result cache.
+
+        Returns:
+            True if cache was cleared, False if caching is disabled.
+        """
+        if _query_cache is None:
+            return False
+        _query_cache.clear()
+        logger.info("Query result cache cleared")
+        return True
+
+    def invalidate_cache(self) -> bool:
+        """Invalidate cache entries (call when database changes).
+
+        Returns:
+            True if cache was invalidated, False if caching is disabled.
+        """
+        return self.clear_cache()
+
 
 def run_interactive(rag: RAGSystem) -> None:
     """Run interactive mode.
@@ -486,10 +573,25 @@ def run_interactive(rag: RAGSystem) -> None:
             print("Commands:")
             print("  query <question>  - Ask a question")
             print("  stats             - Show statistics")
+            print("  cache             - Show cache statistics")
+            print("  cache clear       - Clear the cache")
             print("  quit/exit         - Exit")
         elif cmd == 'stats':
             stats = rag.get_stats()
             print(format_stats(stats))
+        elif cmd == 'cache':
+            if args and args[0] == 'clear':
+                if rag.clear_cache():
+                    print("Cache cleared")
+                else:
+                    print("Caching is disabled")
+            else:
+                cache_stats = rag.get_cache_stats()
+                if cache_stats is None:
+                    print("Caching is disabled")
+                else:
+                    print(f"Cache: {cache_stats['size']}/{cache_stats['max_size']} entries, "
+                          f"hit rate: {cache_stats['hit_rate']:.1%}")
         elif cmd == 'query' and args:
             result = rag.query(args[0])
             print(format_query_result(result))
@@ -596,6 +698,30 @@ def main() -> None:
                             print(f"  Generation: {timing['avg_generation_ms']:.1f}ms")
             finally:
                 conn.close()
+
+        elif args.command == 'cache':
+            import json as json_module
+            cache_stats = rag.get_cache_stats()
+
+            if args.action == 'stats':
+                if cache_stats is None:
+                    print("Query caching is disabled")
+                elif args.json:
+                    print(json_module.dumps(cache_stats, indent=2))
+                else:
+                    print("Query Cache Statistics")
+                    print("=" * 40)
+                    print(f"Size: {cache_stats['size']} / {cache_stats['max_size']}")
+                    print(f"TTL: {cache_stats['ttl_seconds']} seconds")
+                    print(f"Hits: {cache_stats['hits']}")
+                    print(f"Misses: {cache_stats['misses']}")
+                    print(f"Evictions: {cache_stats['evictions']}")
+                    print(f"Hit Rate: {cache_stats['hit_rate']:.1%}")
+            elif args.action == 'clear':
+                if rag.clear_cache():
+                    print("Cache cleared successfully")
+                else:
+                    print("Query caching is disabled")
 
     except KeyboardInterrupt:
         print("\nShutdown requested")

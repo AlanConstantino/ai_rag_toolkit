@@ -162,6 +162,19 @@ LOG_LEVEL: str = os.environ.get('RAG_LOG_LEVEL', 'INFO')
 # Enable metrics collection
 METRICS_ENABLED: bool = os.environ.get('RAG_METRICS_ENABLED', 'true').lower() in ('true', '1', 'yes')
 
+# =============================================================================
+# Query Cache Configuration
+# =============================================================================
+
+# Enable query result caching
+QUERY_CACHE_ENABLED: bool = os.environ.get('RAG_QUERY_CACHE_ENABLED', 'true').lower() in ('true', '1', 'yes')
+
+# Maximum number of query results to cache
+QUERY_CACHE_SIZE: int = int(os.environ.get('RAG_QUERY_CACHE_SIZE', '100'))
+
+# Time-to-live for cached results in seconds (default: 1 hour)
+QUERY_CACHE_TTL: int = int(os.environ.get('RAG_QUERY_CACHE_TTL', '3600'))
+
 
 # =============================================================================
 # Configuration Validation
@@ -371,6 +384,17 @@ def validate_config(require_apis: bool = False) -> Tuple[bool, List[str]]:
             errors.append(
                 f"RAG_HTTP_CACHE_DIR parent directory does not exist: {cache_parent}"
             )
+
+    # Validate query cache settings
+    if QUERY_CACHE_SIZE <= 0:
+        errors.append(
+            f"RAG_QUERY_CACHE_SIZE must be positive, got {QUERY_CACHE_SIZE}"
+        )
+
+    if QUERY_CACHE_TTL < 0:
+        errors.append(
+            f"RAG_QUERY_CACHE_TTL must be non-negative, got {QUERY_CACHE_TTL}"
+        )
 
     return (len(errors) == 0, errors)
 

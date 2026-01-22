@@ -489,3 +489,211 @@ def retry(max_attempts: int = 3, delay: float = 1.0,
             raise last_exception
         return wrapper
     return decorator
+
+
+# =============================================================================
+# LRU Cache with TTL
+# =============================================================================
+
+class LRUCache:
+    """Thread-safe LRU cache with time-to-live (TTL) support.
+
+    Entries are evicted based on access time (LRU) and age (TTL).
+    Uses doubly linked list for O(1) LRU operations.
+    """
+
+    def __init__(self, max_size: int, ttl_seconds: int):
+        """Initialize the LRU cache.
+
+        Args:
+            max_size: Maximum number of entries to store.
+            ttl_seconds: Time-to-live in seconds for cache entries.
+        """
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        self._lock = threading.Lock()
+
+        # Storage: key -> (value, timestamp, prev_key, next_key)
+        self._cache: Dict[str, tuple] = {}
+
+        # Doubly linked list head/tail for LRU ordering
+        self._head: Optional[str] = None  # Most recently used
+        self._tail: Optional[str] = None  # Least recently used
+
+        # Statistics
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+
+    def _is_expired(self, timestamp: float) -> bool:
+        """Check if an entry has expired based on TTL."""
+        if self.ttl_seconds <= 0:
+            return False
+        return time.time() - timestamp > self.ttl_seconds
+
+    def _remove_from_list(self, key: str) -> None:
+        """Remove a key from the linked list (internal, assumes lock held)."""
+        if key not in self._cache:
+            return
+
+        _, _, prev_key, next_key = self._cache[key]
+
+        if prev_key is not None:
+            value, ts, pp, _ = self._cache[prev_key]
+            self._cache[prev_key] = (value, ts, pp, next_key)
+        else:
+            self._head = next_key
+
+        if next_key is not None:
+            value, ts, _, nn = self._cache[next_key]
+            self._cache[next_key] = (value, ts, prev_key, nn)
+        else:
+            self._tail = prev_key
+
+    def _add_to_head(self, key: str) -> None:
+        """Add a key to the head of the list (internal, assumes lock held)."""
+        if key not in self._cache:
+            return
+
+        value, ts, _, _ = self._cache[key]
+        old_head = self._head
+
+        self._cache[key] = (value, ts, None, old_head)
+        self._head = key
+
+        if old_head is not None:
+            value, ts, _, next_key = self._cache[old_head]
+            self._cache[old_head] = (value, ts, key, next_key)
+
+        if self._tail is None:
+            self._tail = key
+
+    def _evict_lru(self) -> None:
+        """Evict the least recently used entry (internal, assumes lock held)."""
+        if self._tail is None:
+            return
+
+        key_to_remove = self._tail
+        self._remove_from_list(key_to_remove)
+        del self._cache[key_to_remove]
+        self._evictions += 1
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get a value from the cache.
+
+        Args:
+            key: Cache key.
+
+        Returns:
+            Cached value or None if not found/expired.
+        """
+        with self._lock:
+            if key not in self._cache:
+                self._misses += 1
+                return None
+
+            value, timestamp, _, _ = self._cache[key]
+
+            # Check if expired
+            if self._is_expired(timestamp):
+                self._remove_from_list(key)
+                del self._cache[key]
+                self._misses += 1
+                return None
+
+            # Move to head (most recently used)
+            self._remove_from_list(key)
+            self._cache[key] = (value, timestamp, None, None)
+            self._add_to_head(key)
+
+            self._hits += 1
+            return value
+
+    def put(self, key: str, value: Any) -> None:
+        """Put a value in the cache.
+
+        Args:
+            key: Cache key.
+            value: Value to cache.
+        """
+        with self._lock:
+            # Update existing entry
+            if key in self._cache:
+                self._remove_from_list(key)
+
+            # Evict if at capacity
+            while len(self._cache) >= self.max_size:
+                self._evict_lru()
+
+            # Add new entry
+            self._cache[key] = (value, time.time(), None, None)
+            self._add_to_head(key)
+
+    def delete(self, key: str) -> bool:
+        """Delete an entry from the cache.
+
+        Args:
+            key: Cache key.
+
+        Returns:
+            True if the entry was found and deleted.
+        """
+        with self._lock:
+            if key not in self._cache:
+                return False
+
+            self._remove_from_list(key)
+            del self._cache[key]
+            return True
+
+    def clear(self) -> None:
+        """Clear all entries from the cache."""
+        with self._lock:
+            self._cache.clear()
+            self._head = None
+            self._tail = None
+            # Don't reset statistics on clear
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get cache statistics.
+
+        Returns:
+            Dict with hits, misses, evictions, and size.
+        """
+        with self._lock:
+            total = self._hits + self._misses
+            hit_rate = self._hits / total if total > 0 else 0.0
+            return {
+                'hits': self._hits,
+                'misses': self._misses,
+                'evictions': self._evictions,
+                'size': len(self._cache),
+                'max_size': self.max_size,
+                'ttl_seconds': self.ttl_seconds,
+                'hit_rate': round(hit_rate, 4)
+            }
+
+    def reset_stats(self) -> None:
+        """Reset cache statistics."""
+        with self._lock:
+            self._hits = 0
+            self._misses = 0
+            self._evictions = 0
+
+    def cleanup_expired(self) -> int:
+        """Remove all expired entries from the cache.
+
+        Returns:
+            Number of entries removed.
+        """
+        with self._lock:
+            keys_to_remove = []
+            for key, (_, timestamp, _, _) in self._cache.items():
+                if self._is_expired(timestamp):
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                self._remove_from_list(key)
+                del self._cache[key]
+
+            return len(keys_to_remove)
