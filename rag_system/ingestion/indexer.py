@@ -19,6 +19,7 @@ from rag_system.ingestion.crawler import Crawler
 from rag_system.ingestion.parser import parse_html, extract_title
 from rag_system.ingestion.chunker import chunk_markdown
 from rag_system.ingestion.html_to_markdown import html_to_markdown
+from rag_system.security import sanitize_html_content, validate_content_length
 from rag_system.utils import hash_content, get_logger
 
 logger = get_logger(__name__)
@@ -81,6 +82,15 @@ class Indexer:
         """
         url = page_data['url']
         html = page_data['html']
+
+        # Validate content length
+        is_valid, error = validate_content_length(html)
+        if not is_valid:
+            logger.warning(f"Content too large for {url}: {error}")
+            return None
+
+        # Sanitize HTML content to remove potentially dangerous elements
+        html = sanitize_html_content(html)
 
         conn = get_connection(self.db_path)
 
