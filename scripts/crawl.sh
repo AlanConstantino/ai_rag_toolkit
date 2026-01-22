@@ -9,13 +9,15 @@
 #   everything in the local SQLite database.
 #
 # USAGE:
-#   ./scripts/crawl.sh <url>                    # Crawl with default settings
+#   ./scripts/crawl.sh <url>                    # Crawl with default settings (max 1000 pages)
 #   ./scripts/crawl.sh <url> --max-pages 100    # Limit to 100 pages
+#   ./scripts/crawl.sh <url> --unlimited        # Crawl ALL pages (no limit)
 #   ./scripts/crawl.sh <url> --ignore-robots    # Ignore robots.txt (use responsibly!)
 #
 # EXAMPLES:
 #   ./scripts/crawl.sh https://docs.python.org/3/
 #   ./scripts/crawl.sh https://fastapi.tiangolo.com --max-pages 50
+#   ./scripts/crawl.sh https://docs.python.org/3.6/ --unlimited --ignore-robots
 #
 # REQUIREMENTS:
 #   - Python 3.6.5+

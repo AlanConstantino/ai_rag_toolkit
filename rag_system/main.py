@@ -125,6 +125,10 @@ def create_parser() -> argparse.ArgumentParser:
         help='Maximum pages to crawl'
     )
     ingest_parser.add_argument(
+        '--unlimited', action='store_true',
+        help='Crawl all pages with no limit (overrides --max-pages)'
+    )
+    ingest_parser.add_argument(
         '--ignore-robots', action='store_true',
         help='Ignore robots.txt restrictions (use responsibly)'
     )
@@ -738,11 +742,16 @@ def main() -> None:
         rag = RAGSystem(db_path=args.db)
 
         if args.command == 'ingest':
-            print(f"Ingesting from {args.url}...")
+            import sys
+            max_pages = sys.maxsize if args.unlimited else args.max_pages
+            if args.unlimited:
+                print(f"Ingesting from {args.url} (unlimited pages)...")
+            else:
+                print(f"Ingesting from {args.url} (max {max_pages} pages)...")
             try:
                 stats = rag.ingest(
                     args.url,
-                    max_pages=args.max_pages,
+                    max_pages=max_pages,
                     ignore_robots=args.ignore_robots
                 )
                 print(f"Crawled {stats['pages_crawled']} pages, indexed {stats['pages_indexed']}, skipped {stats['pages_skipped']}, errors: {stats['errors']}")
