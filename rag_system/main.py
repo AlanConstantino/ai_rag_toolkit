@@ -8,6 +8,35 @@ import hashlib
 import os
 from typing import Dict, List, Any, Tuple, Optional
 
+
+def load_dotenv(path: str = '.env') -> None:
+    """Load environment variables from a .env file.
+
+    Args:
+        path: Path to .env file. Defaults to '.env' in current directory.
+    """
+    if not os.path.exists(path):
+        return
+
+    with open(path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith('#'):
+                continue
+            # Parse KEY=VALUE
+            if '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                # Don't override existing env vars
+                if key and key not in os.environ:
+                    os.environ[key] = value
+
+
+# Load .env file at import time (before config is loaded elsewhere)
+load_dotenv()
+
 from rag_system import config
 from rag_system.database import (
     init_db, get_connection, managed_connection, cache_query, get_cached_query, log_query,
@@ -141,6 +170,16 @@ def create_parser() -> argparse.ArgumentParser:
     cache_parser.add_argument(
         '--json', action='store_true',
         help='Output as JSON'
+    )
+
+    # Backfill embeddings command
+    backfill_parser = subparsers.add_parser(
+        'backfill',
+        help='Generate embeddings for chunks that are missing them'
+    )
+    backfill_parser.add_argument(
+        '--batch-size', type=int, default=config.EMBEDDING_BATCH_SIZE,
+        help='Number of chunks to embed per API call'
     )
 
     return parser
@@ -603,6 +642,85 @@ def run_interactive(rag: RAGSystem) -> None:
         print()
 
 
+def backfill_embeddings(db_path: str, vector_client: Any,
+                         batch_size: int = 100) -> Dict[str, int]:
+    """Generate embeddings for chunks that don't have them.
+
+    Args:
+        db_path: Path to SQLite database.
+        vector_client: Vector API client for embeddings.
+        batch_size: Number of chunks to embed per API call.
+
+    Returns:
+        Dict with statistics about the backfill operation.
+    """
+    import time
+    from rag_system.database import get_connection, update_chunk_embedding
+    from rag_system.ingestion.indexer import build_contextual_text
+    from rag_system.api_client import APIError
+
+    conn = get_connection(db_path)
+    try:
+        # Find chunks without embeddings
+        cursor = conn.execute("""
+            SELECT c.id, c.content, c.heading_path, p.title
+            FROM chunks c
+            JOIN pages p ON c.page_id = p.id
+            WHERE c.embedding_json IS NULL
+            ORDER BY c.id
+        """)
+        chunks_to_embed = cursor.fetchall()
+
+        total = len(chunks_to_embed)
+        if total == 0:
+            print("All chunks already have embeddings!")
+            return {'total': 0, 'embedded': 0, 'errors': 0}
+
+        print(f"Found {total} chunks without embeddings")
+
+        embedded = 0
+        errors = 0
+        batch_delay = config.EMBEDDING_BATCH_DELAY
+
+        for i in range(0, total, batch_size):
+            batch = chunks_to_embed[i:i + batch_size]
+
+            # Build contextual text for each chunk
+            texts = []
+            for row in batch:
+                chunk = {
+                    'content': row['content'],
+                    'heading_path': row['heading_path']
+                }
+                texts.append(build_contextual_text(chunk, row['title']))
+
+            try:
+                embeddings = vector_client.get_embeddings_batch(texts)
+
+                for row, embedding in zip(batch, embeddings):
+                    update_chunk_embedding(conn, row['id'], embedding)
+                    embedded += 1
+
+                print(f"Progress: {embedded}/{total} chunks embedded")
+
+            except APIError as e:
+                logger.error(f"API error during backfill: {e}")
+                errors += len(batch)
+            except Exception as e:
+                logger.error(f"Unexpected error during backfill: {e}")
+                errors += len(batch)
+
+            # Rate limit between batches
+            if i + batch_size < total and batch_delay > 0:
+                time.sleep(batch_delay)
+
+        print(f"Backfill complete: {embedded} embedded, {errors} errors")
+        return {'total': total, 'embedded': embedded, 'errors': errors}
+
+    finally:
+        conn.close()
+
+
 def main() -> None:
     """Main entry point."""
     # Install graceful shutdown handlers
@@ -722,6 +840,19 @@ def main() -> None:
                     print("Cache cleared successfully")
                 else:
                     print("Query caching is disabled")
+
+        elif args.command == 'backfill':
+            if not rag.vector_client:
+                print("Error: No vector client configured.")
+                print("Set OPENAI_API_KEY or configure RAG_VECTOR_API_ENDPOINT")
+                import sys
+                sys.exit(1)
+
+            backfill_embeddings(
+                rag.db_path,
+                rag.vector_client,
+                batch_size=args.batch_size
+            )
 
     except KeyboardInterrupt:
         print("\nShutdown requested")
