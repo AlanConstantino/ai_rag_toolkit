@@ -887,6 +887,76 @@ def get_doc_terms(conn: sqlite3.Connection, chunk_id: int) -> Dict[str, int]:
     return {row['term']: row['term_frequency'] for row in cursor.fetchall()}
 
 
+def get_doc_terms_batch(conn: sqlite3.Connection,
+                        chunk_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    """Get term frequencies for multiple chunks in a single query.
+
+    This is more efficient than calling get_doc_terms() repeatedly.
+
+    Args:
+        conn: Database connection.
+        chunk_ids: List of chunk IDs to fetch.
+
+    Returns:
+        Dict mapping chunk_id to dict of {term: frequency}.
+    """
+    if not chunk_ids:
+        return {}
+
+    # SQLite has a limit on the number of variables in a query (~999)
+    # Process in batches if needed
+    batch_size = 500
+    result: Dict[int, Dict[str, int]] = {cid: {} for cid in chunk_ids}
+
+    for i in range(0, len(chunk_ids), batch_size):
+        batch = chunk_ids[i:i + batch_size]
+        placeholders = ','.join(['?' for _ in batch])
+        cursor = conn.execute(
+            f"""SELECT chunk_id, term, term_frequency
+                FROM doc_terms
+                WHERE chunk_id IN ({placeholders})""",
+            batch
+        )
+        for row in cursor.fetchall():
+            result[row['chunk_id']][row['term']] = row['term_frequency']
+
+    return result
+
+
+def get_term_doc_frequencies_batch(conn: sqlite3.Connection,
+                                   terms: List[str]) -> Dict[str, int]:
+    """Get document frequencies for multiple terms in a single query.
+
+    This is more efficient than calling get_term_doc_frequency() repeatedly.
+
+    Args:
+        conn: Database connection.
+        terms: List of terms to fetch.
+
+    Returns:
+        Dict mapping term to document frequency (0 if not found).
+    """
+    if not terms:
+        return {}
+
+    batch_size = 500
+    result: Dict[str, int] = {term: 0 for term in terms}
+
+    for i in range(0, len(terms), batch_size):
+        batch = terms[i:i + batch_size]
+        placeholders = ','.join(['?' for _ in batch])
+        cursor = conn.execute(
+            f"""SELECT term, doc_frequency
+                FROM term_doc_frequencies
+                WHERE term IN ({placeholders})""",
+            batch
+        )
+        for row in cursor.fetchall():
+            result[row['term']] = row['doc_frequency']
+
+    return result
+
+
 def update_corpus_stats(conn: sqlite3.Connection, total_docs: int,
                         avg_doc_length: float, auto_commit: bool = True) -> None:
     """Update corpus statistics.

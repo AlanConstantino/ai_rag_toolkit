@@ -10,9 +10,9 @@ from typing import Dict, List, Tuple, Set
 
 from rag_system import config
 from rag_system.database import (
-    get_connection, insert_doc_terms, get_doc_terms,
+    get_connection, insert_doc_terms, get_doc_terms, get_doc_terms_batch,
     update_corpus_stats, get_corpus_stats,
-    update_term_doc_frequencies, get_term_doc_frequency
+    update_term_doc_frequencies, get_term_doc_frequency, get_term_doc_frequencies_batch
 )
 from rag_system.utils import get_logger
 
@@ -98,7 +98,10 @@ def bm25_score(query_terms: List[str], doc_term_freqs: Dict[str, int],
 
 
 class BM25Index:
-    """Builds and maintains BM25 index."""
+    """Builds and maintains BM25 index.
+
+    Supports both full rebuilds and incremental updates.
+    """
 
     def __init__(self, db_path: str):
         """Initialize the BM25 index.
@@ -155,6 +158,191 @@ class BM25Index:
         finally:
             conn.close()
 
+    def index_chunk(self, chunk_id: int, content: str) -> None:
+        """Index a single chunk (incremental update).
+
+        This is more efficient than rebuilding the entire index when
+        adding new documents.
+
+        Args:
+            chunk_id: ID of the chunk to index.
+            content: Content of the chunk.
+        """
+        conn = get_connection(self.db_path)
+
+        try:
+            # Tokenize and count terms
+            tokens = tokenize_for_bm25(content, remove_stopwords=True)
+            term_freqs = Counter(tokens)
+
+            # Get old terms for this chunk (if re-indexing)
+            old_terms = get_doc_terms(conn, chunk_id)
+
+            # Clear existing terms
+            conn.execute("DELETE FROM doc_terms WHERE chunk_id = ?", (chunk_id,))
+
+            # Insert new terms
+            if term_freqs:
+                insert_doc_terms(conn, chunk_id, dict(term_freqs), auto_commit=False)
+
+            # Update term document frequencies incrementally
+            terms_to_update: Dict[str, int] = {}
+
+            # Decrement for old terms that aren't in new content
+            for term in set(old_terms.keys()) - set(term_freqs.keys()):
+                current = get_term_doc_frequency(conn, term)
+                if current > 0:
+                    terms_to_update[term] = current - 1
+
+            # Increment for new terms that weren't in old content
+            for term in set(term_freqs.keys()) - set(old_terms.keys()):
+                current = get_term_doc_frequency(conn, term)
+                terms_to_update[term] = current + 1
+
+            if terms_to_update:
+                update_term_doc_frequencies(conn, terms_to_update, auto_commit=False)
+
+            # Update corpus stats
+            stats = get_corpus_stats(conn)
+            if stats:
+                old_doc_length = sum(old_terms.values()) if old_terms else 0
+                new_doc_length = len(tokens)
+
+                # Adjust average document length
+                total_docs = stats['total_docs']
+                old_avg = stats['avg_doc_length']
+
+                if old_terms:
+                    # Re-indexing existing chunk
+                    total_length = old_avg * total_docs - old_doc_length + new_doc_length
+                else:
+                    # New chunk
+                    total_length = old_avg * total_docs + new_doc_length
+                    total_docs += 1
+
+                new_avg = total_length / total_docs if total_docs > 0 else 0
+                update_corpus_stats(conn, total_docs, new_avg, auto_commit=False)
+
+            conn.commit()
+            logger.debug(f"Indexed chunk {chunk_id} with {len(term_freqs)} unique terms")
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def remove_chunk(self, chunk_id: int) -> None:
+        """Remove a chunk from the index.
+
+        Args:
+            chunk_id: ID of the chunk to remove.
+        """
+        conn = get_connection(self.db_path)
+
+        try:
+            # Get terms for this chunk
+            old_terms = get_doc_terms(conn, chunk_id)
+
+            if not old_terms:
+                return  # Chunk not indexed
+
+            # Remove terms
+            conn.execute("DELETE FROM doc_terms WHERE chunk_id = ?", (chunk_id,))
+
+            # Decrement document frequencies for all terms
+            terms_to_update = {}
+            for term in old_terms:
+                current = get_term_doc_frequency(conn, term)
+                if current > 0:
+                    terms_to_update[term] = current - 1
+
+            if terms_to_update:
+                update_term_doc_frequencies(conn, terms_to_update, auto_commit=False)
+
+            # Update corpus stats
+            stats = get_corpus_stats(conn)
+            if stats and stats['total_docs'] > 0:
+                doc_length = sum(old_terms.values())
+                total_docs = stats['total_docs'] - 1
+                if total_docs > 0:
+                    total_length = stats['avg_doc_length'] * stats['total_docs'] - doc_length
+                    new_avg = total_length / total_docs
+                else:
+                    new_avg = 0
+                update_corpus_stats(conn, total_docs, new_avg, auto_commit=False)
+
+            conn.commit()
+            logger.debug(f"Removed chunk {chunk_id} from BM25 index")
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def index_chunks_batch(self, chunks: List[Tuple[int, str]]) -> None:
+        """Index multiple chunks efficiently.
+
+        Args:
+            chunks: List of (chunk_id, content) tuples.
+        """
+        if not chunks:
+            return
+
+        conn = get_connection(self.db_path)
+
+        try:
+            term_doc_counts: Dict[str, int] = Counter()
+            total_length = 0
+
+            for chunk_id, content in chunks:
+                tokens = tokenize_for_bm25(content, remove_stopwords=True)
+                term_freqs = Counter(tokens)
+
+                # Clear existing terms
+                conn.execute("DELETE FROM doc_terms WHERE chunk_id = ?", (chunk_id,))
+
+                # Insert new terms
+                if term_freqs:
+                    insert_doc_terms(conn, chunk_id, dict(term_freqs), auto_commit=False)
+
+                # Track document frequencies
+                for term in set(tokens):
+                    term_doc_counts[term] += 1
+
+                total_length += len(tokens)
+
+            # Get current corpus stats
+            stats = get_corpus_stats(conn)
+            if stats:
+                # Update existing stats
+                total_docs = stats['total_docs'] + len(chunks)
+                old_total_length = stats['avg_doc_length'] * stats['total_docs']
+                avg_length = (old_total_length + total_length) / total_docs
+            else:
+                # First batch
+                total_docs = len(chunks)
+                avg_length = total_length / total_docs if chunks else 0
+
+            update_corpus_stats(conn, total_docs, avg_length, auto_commit=False)
+
+            # Update term document frequencies
+            existing_freqs = get_term_doc_frequencies_batch(conn, list(term_doc_counts.keys()))
+            for term, count in term_doc_counts.items():
+                term_doc_counts[term] = existing_freqs.get(term, 0) + count
+
+            update_term_doc_frequencies(conn, dict(term_doc_counts), auto_commit=False)
+
+            conn.commit()
+            logger.info(f"Batch indexed {len(chunks)} chunks, {len(term_doc_counts)} unique terms")
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
 
 class BM25Search:
     """Performs BM25 search over indexed chunks."""
@@ -170,6 +358,8 @@ class BM25Search:
     def search(self, query: str, top_k: int = 10,
                chunk_type: str = 'small') -> List[Tuple[int, float]]:
         """Search for chunks matching the query.
+
+        Uses batch queries for efficiency when many chunks match.
 
         Args:
             query: Search query.
@@ -195,13 +385,10 @@ class BM25Search:
             total_docs = stats['total_docs']
             avg_doc_length = stats['avg_doc_length']
 
-            # Get document frequencies for query terms
-            doc_frequencies = {}
-            for term in query_terms:
-                doc_frequencies[term] = get_term_doc_frequency(conn, term)
+            # Batch fetch document frequencies for all query terms
+            doc_frequencies = get_term_doc_frequencies_batch(conn, query_terms)
 
             # Get all chunks with matching terms
-            # First find chunks that have at least one query term
             placeholders = ','.join(['?' for _ in query_terms])
             cursor = conn.execute(
                 f"""SELECT DISTINCT chunk_id FROM doc_terms
@@ -213,12 +400,14 @@ class BM25Search:
             if not candidate_chunk_ids:
                 return []
 
+            # Batch fetch term frequencies for all candidate chunks
+            all_term_freqs = get_doc_terms_batch(conn, candidate_chunk_ids)
+
             # Score each candidate
             results = []
 
             for chunk_id in candidate_chunk_ids:
-                # Get term frequencies for this chunk
-                term_freqs = get_doc_terms(conn, chunk_id)
+                term_freqs = all_term_freqs.get(chunk_id, {})
                 doc_length = sum(term_freqs.values())
 
                 score = bm25_score(
