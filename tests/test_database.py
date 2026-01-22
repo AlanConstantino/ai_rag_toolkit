@@ -568,5 +568,229 @@ class TestQueryCacheOperations(unittest.TestCase):
         conn.close()
 
 
+class TestDatabaseErrorHandling(unittest.TestCase):
+    """Test database error handling functionality."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_insert_duplicate_page_raises_integrity_error(self):
+        """insert_page should raise IntegrityConstraintError for duplicate URL."""
+        from rag_system.database import (
+            get_connection, insert_page, IntegrityConstraintError
+        )
+        conn = get_connection(self.temp_path)
+
+        # Insert first page
+        insert_page(conn, url='https://example.com/page1', title='Test',
+                   raw_html='', parsed_text='', content_hash='abc')
+
+        # Try to insert duplicate
+        with self.assertRaises(IntegrityConstraintError):
+            insert_page(conn, url='https://example.com/page1', title='Test 2',
+                       raw_html='', parsed_text='', content_hash='def')
+
+        conn.close()
+
+    def test_insert_chunk_with_invalid_page_id_raises_error(self):
+        """insert_chunk should raise IntegrityConstraintError for invalid page_id."""
+        from rag_system.database import (
+            get_connection, insert_chunk, IntegrityConstraintError
+        )
+        conn = get_connection(self.temp_path)
+
+        with self.assertRaises(IntegrityConstraintError):
+            insert_chunk(conn, page_id=99999, chunk_type='large',
+                        chunk_index=0, content='Test', heading_path='A')
+
+        conn.close()
+
+    def test_transaction_context_manager_commits_on_success(self):
+        """transaction() should commit when block completes successfully."""
+        from rag_system.database import (
+            get_connection, insert_page, get_page_by_url, transaction
+        )
+        conn = get_connection(self.temp_path)
+
+        with transaction(conn):
+            insert_page(conn, url='https://example.com/tx', title='TX Test',
+                       raw_html='', parsed_text='', content_hash='abc',
+                       auto_commit=False)
+
+        # Verify the page was committed
+        page = get_page_by_url(conn, 'https://example.com/tx')
+        self.assertIsNotNone(page)
+        conn.close()
+
+    def test_transaction_context_manager_rolls_back_on_error(self):
+        """transaction() should rollback when an error occurs."""
+        from rag_system.database import (
+            get_connection, insert_page, get_page_by_url, transaction,
+            TransactionError
+        )
+        conn = get_connection(self.temp_path)
+
+        try:
+            with transaction(conn):
+                insert_page(conn, url='https://example.com/rollback', title='Test',
+                           raw_html='', parsed_text='', content_hash='abc',
+                           auto_commit=False)
+                raise ValueError("Simulated error")
+        except TransactionError:
+            pass
+
+        # Verify the page was NOT committed
+        page = get_page_by_url(conn, 'https://example.com/rollback')
+        self.assertIsNone(page)
+        conn.close()
+
+    def test_transaction_rolls_back_on_integrity_error(self):
+        """transaction() should rollback and raise on integrity error."""
+        from rag_system.database import (
+            get_connection, insert_page, get_page_by_url, transaction,
+            IntegrityConstraintError
+        )
+        conn = get_connection(self.temp_path)
+
+        # Insert first page
+        insert_page(conn, url='https://example.com/first', title='First',
+                   raw_html='', parsed_text='', content_hash='abc')
+
+        try:
+            with transaction(conn):
+                # This should fail due to duplicate URL
+                conn.execute(
+                    "INSERT INTO pages (url, title, raw_html, parsed_text, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    ('https://example.com/first', 'Duplicate', '', '', 'def')
+                )
+        except IntegrityConstraintError:
+            pass
+
+        conn.close()
+
+    def test_custom_exceptions_are_proper_subclasses(self):
+        """Custom exceptions should be proper exception subclasses."""
+        from rag_system.database import (
+            DatabaseError, ConnectionError, TransactionError,
+            IntegrityConstraintError, QueryError
+        )
+
+        self.assertTrue(issubclass(ConnectionError, DatabaseError))
+        self.assertTrue(issubclass(TransactionError, DatabaseError))
+        self.assertTrue(issubclass(IntegrityConstraintError, DatabaseError))
+        self.assertTrue(issubclass(QueryError, DatabaseError))
+        self.assertTrue(issubclass(DatabaseError, Exception))
+
+
+class TestRetryDecorator(unittest.TestCase):
+    """Test the retry_on_error decorator."""
+
+    def test_retry_decorator_succeeds_on_first_try(self):
+        """Decorator should not retry if operation succeeds."""
+        from rag_system.database import retry_on_error
+
+        call_count = [0]
+
+        @retry_on_error(max_retries=3, retry_delay=0.01)
+        def successful_operation():
+            call_count[0] += 1
+            return "success"
+
+        result = successful_operation()
+        self.assertEqual(result, "success")
+        self.assertEqual(call_count[0], 1)
+
+    def test_retry_decorator_retries_on_operational_error(self):
+        """Decorator should retry on OperationalError."""
+        from rag_system.database import retry_on_error, ConnectionError
+
+        call_count = [0]
+
+        @retry_on_error(max_retries=2, retry_delay=0.01)
+        def flaky_operation():
+            call_count[0] += 1
+            if call_count[0] < 2:
+                raise sqlite3.OperationalError("database is locked")
+            return "success"
+
+        result = flaky_operation()
+        self.assertEqual(result, "success")
+        self.assertEqual(call_count[0], 2)
+
+    def test_retry_decorator_raises_after_max_retries(self):
+        """Decorator should raise ConnectionError after max retries."""
+        from rag_system.database import retry_on_error, ConnectionError
+
+        call_count = [0]
+
+        @retry_on_error(max_retries=2, retry_delay=0.01)
+        def always_fails():
+            call_count[0] += 1
+            raise sqlite3.OperationalError("database is locked")
+
+        with self.assertRaises(ConnectionError):
+            always_fails()
+
+        self.assertEqual(call_count[0], 3)  # Initial try + 2 retries
+
+
+class TestAutoCommitParameter(unittest.TestCase):
+    """Test the auto_commit parameter on database operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_auto_commit_false_does_not_commit(self):
+        """Operations with auto_commit=False should not commit."""
+        from rag_system.database import get_connection, insert_page, get_page_by_url
+        conn = get_connection(self.temp_path)
+
+        insert_page(conn, url='https://example.com/nocommit', title='Test',
+                   raw_html='', parsed_text='', content_hash='abc',
+                   auto_commit=False)
+
+        # Rollback to verify it wasn't committed
+        conn.rollback()
+
+        page = get_page_by_url(conn, 'https://example.com/nocommit')
+        self.assertIsNone(page)
+        conn.close()
+
+    def test_auto_commit_true_commits(self):
+        """Operations with auto_commit=True (default) should commit."""
+        from rag_system.database import get_connection, insert_page, get_page_by_url
+        conn = get_connection(self.temp_path)
+
+        insert_page(conn, url='https://example.com/commit', title='Test',
+                   raw_html='', parsed_text='', content_hash='abc',
+                   auto_commit=True)
+
+        # Rollback should not affect committed data
+        conn.rollback()
+
+        page = get_page_by_url(conn, 'https://example.com/commit')
+        self.assertIsNotNone(page)
+        conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()
