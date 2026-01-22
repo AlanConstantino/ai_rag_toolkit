@@ -67,6 +67,14 @@ EXCLUDED_PATHS = [p.strip() for p in _excluded_paths.split(',') if p.strip()]
 _included_paths = os.environ.get('RAG_INCLUDED_PATHS', '')
 INCLUDED_PATHS = [p.strip() for p in _included_paths.split(',') if p.strip()] if _included_paths else None
 
+# Retry settings for transient errors
+CRAWLER_MAX_RETRIES = int(os.environ.get('RAG_CRAWLER_MAX_RETRIES', '3'))
+CRAWLER_RETRY_DELAY = float(os.environ.get('RAG_CRAWLER_RETRY_DELAY', '1.0'))
+CRAWLER_RETRY_STATUS_CODES = [
+    int(code.strip())
+    for code in os.environ.get('RAG_CRAWLER_RETRY_STATUS_CODES', '500,502,503,504').split(',')
+    if code.strip()
+]
 # =============================================================================
 # Chunking Settings
 # =============================================================================
