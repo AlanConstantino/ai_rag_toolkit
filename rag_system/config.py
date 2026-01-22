@@ -75,6 +75,27 @@ CRAWLER_RETRY_STATUS_CODES = [
     for code in os.environ.get('RAG_CRAWLER_RETRY_STATUS_CODES', '500,502,503,504').split(',')
     if code.strip()
 ]
+
+# =============================================================================
+# Main Content Detection
+# =============================================================================
+
+# Selectors to identify main content areas (checked in order of priority)
+MAIN_CONTENT_SELECTORS = [
+    'main',           # HTML5 main tag
+    'article',        # HTML5 article tag
+    'role=main',      # ARIA role
+    'class=main-content',
+    'class=article-content',
+    'class=post-content',
+    'class=entry-content',
+    'class=page-content',
+    'class=content-area',
+    'id=main-content',
+    'id=content',
+    'id=main',
+]
+
 # =============================================================================
 # Chunking Settings
 # =============================================================================
