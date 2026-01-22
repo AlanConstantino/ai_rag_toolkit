@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import urllib.error
 
-from rag_system.ingestion.crawler import Crawler
+from rag_system.ingestion.crawler import Crawler, FetchError
 from rag_system import config
 
 
@@ -105,12 +105,12 @@ class TestCrawlerRetryLogic(unittest.TestCase):
             'https://example.com/notfound', 404, 'Not Found', {}, None
         )
 
-        with self.assertRaises(urllib.error.HTTPError) as context:
+        with self.assertRaises(FetchError) as context:
             self.crawler._fetch_url('https://example.com/notfound')
 
         # Should have only tried once
         self.assertEqual(mock_urlopen.call_count, 1)
-        self.assertEqual(context.exception.code, 404)
+        self.assertEqual(context.exception.status_code, 404)
 
     @patch('rag_system.ingestion.crawler.urllib.request.urlopen')
     @patch('time.sleep')
@@ -141,11 +141,13 @@ class TestCrawlerRetryLogic(unittest.TestCase):
         )
 
         with patch('rag_system.config.CRAWLER_MAX_RETRIES', 3):
-            with self.assertRaises(urllib.error.HTTPError):
+            with self.assertRaises(FetchError) as context:
                 self.crawler._fetch_url('https://example.com/')
 
         # Should have tried 1 + 3 retries = 4 times total
         self.assertEqual(mock_urlopen.call_count, 4)
+        # FetchError should contain the HTTP status code
+        self.assertEqual(context.exception.status_code, 500)
 
     @patch('rag_system.ingestion.crawler.urllib.request.urlopen')
     @patch('time.sleep')
@@ -159,7 +161,7 @@ class TestCrawlerRetryLogic(unittest.TestCase):
             with patch('rag_system.config.CRAWLER_RETRY_DELAY', 1.0):
                 try:
                     self.crawler._fetch_url('https://example.com/')
-                except urllib.error.HTTPError:
+                except FetchError:
                     pass
 
         # Should have called sleep with exponential delays: 1, 2, 4
@@ -185,12 +187,15 @@ class TestCrawlerRetryInCrawlMethod(unittest.TestCase):
         crawler.queue = ['https://example.com/page1', 'https://example.com/page2']
         crawler.visited = set()
 
-        # First URL fails completely, second succeeds
+        # First URL fails completely with FetchError, second succeeds
+        # Use no-link HTML to avoid triggering additional fetches
         mock_fetch.side_effect = [
-            urllib.error.HTTPError(
-                'https://example.com/page1', 500, 'Internal Server Error', {}, None
+            FetchError(
+                url='https://example.com/page1',
+                message='HTTP 500: Internal Server Error',
+                status_code=500
             ),
-            ('<html><a href="/page3">link</a></html>', 200)
+            ('<html><body>Success</body></html>', 200)
         ]
 
         results = list(crawler.crawl())
@@ -198,6 +203,11 @@ class TestCrawlerRetryInCrawlMethod(unittest.TestCase):
         # Should have yielded 1 result (page2)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['url'], 'https://example.com/page2')
+
+        # Stats should show 1 success and 1 failure
+        stats = crawler.get_stats()
+        self.assertEqual(stats.pages_succeeded, 1)
+        self.assertEqual(stats.pages_failed, 1)
 
 
 if __name__ == '__main__':

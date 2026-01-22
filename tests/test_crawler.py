@@ -220,7 +220,7 @@ class TestCrawler(unittest.TestCase):
 
     def test_crawler_handles_errors(self):
         """Crawler should handle fetch errors gracefully."""
-        from rag_system.ingestion.crawler import Crawler
+        from rag_system.ingestion.crawler import Crawler, FetchError
 
         crawler = Crawler(
             start_url='https://example.com',
@@ -237,13 +237,20 @@ class TestCrawler(unittest.TestCase):
             if call_count[0] == 1:
                 return '<html><a href="/page2">Link</a></html>', 200
             else:
-                raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+                # Raise FetchError since mock bypasses the conversion logic
+                raise FetchError(url, 'HTTP 404: Not Found', status_code=404)
 
         with patch.object(crawler, '_fetch_url', side_effect=mock_fetch):
             pages = list(crawler.crawl())
 
         # Should get first page despite second failing
         self.assertEqual(len(pages), 1)
+
+        # Check that stats recorded the failure
+        stats = crawler.get_stats()
+        self.assertEqual(stats.pages_succeeded, 1)
+        self.assertEqual(stats.pages_failed, 1)
+        self.assertEqual(len(stats.errors), 1)
 
     def test_crawler_avoids_duplicate_urls(self):
         """Crawler should not visit the same URL twice."""
@@ -363,6 +370,390 @@ class TestRobotsParser(unittest.TestCase):
         parser = RobotsParser('https://example.com', robots_txt)
 
         self.assertEqual(parser.get_crawl_delay(), 2.0)
+
+
+class TestCrawlerExceptions(unittest.TestCase):
+    """Test custom crawler exceptions."""
+
+    def test_crawler_error_is_base_exception(self):
+        """CrawlerError should be the base exception."""
+        from rag_system.ingestion.crawler import CrawlerError, FetchError, CacheError
+
+        self.assertTrue(issubclass(FetchError, CrawlerError))
+        self.assertTrue(issubclass(CacheError, CrawlerError))
+
+    def test_fetch_error_has_attributes(self):
+        """FetchError should store url and status_code."""
+        from rag_system.ingestion.crawler import FetchError
+
+        error = FetchError(url='https://example.com', message='Not Found', status_code=404)
+
+        self.assertEqual(error.url, 'https://example.com')
+        self.assertEqual(error.status_code, 404)
+        self.assertIn('https://example.com', str(error))
+
+    def test_cache_error_has_url(self):
+        """CacheError should store url."""
+        from rag_system.ingestion.crawler import CacheError
+
+        error = CacheError(url='https://example.com', message='Corrupted')
+
+        self.assertEqual(error.url, 'https://example.com')
+
+    def test_url_validation_error_has_reason(self):
+        """URLValidationError should store url and reason."""
+        from rag_system.ingestion.crawler import URLValidationError
+
+        error = URLValidationError(url='file:///etc/passwd', reason='Invalid scheme')
+
+        self.assertEqual(error.url, 'file:///etc/passwd')
+        self.assertEqual(error.reason, 'Invalid scheme')
+
+
+class TestURLValidation(unittest.TestCase):
+    """Test URL validation functions."""
+
+    def test_validate_url_valid_https(self):
+        """validate_url should accept valid https URLs."""
+        from rag_system.ingestion.crawler import validate_url
+
+        is_valid, error = validate_url('https://example.com/page')
+
+        self.assertTrue(is_valid)
+        self.assertIsNone(error)
+
+    def test_validate_url_valid_http(self):
+        """validate_url should accept valid http URLs."""
+        from rag_system.ingestion.crawler import validate_url
+
+        is_valid, error = validate_url('http://example.com/page')
+
+        self.assertTrue(is_valid)
+        self.assertIsNone(error)
+
+    def test_validate_url_rejects_file_scheme(self):
+        """validate_url should reject file:// URLs."""
+        from rag_system.ingestion.crawler import validate_url
+
+        is_valid, error = validate_url('file:///etc/passwd')
+
+        self.assertFalse(is_valid)
+        self.assertIn('scheme', error.lower())
+
+    def test_validate_url_rejects_ftp_scheme(self):
+        """validate_url should reject ftp:// URLs."""
+        from rag_system.ingestion.crawler import validate_url
+
+        is_valid, error = validate_url('ftp://example.com/file')
+
+        self.assertFalse(is_valid)
+        self.assertIn('scheme', error.lower())
+
+    def test_validate_url_rejects_localhost(self):
+        """validate_url should reject localhost by default."""
+        from rag_system.ingestion.crawler import validate_url
+
+        is_valid, error = validate_url('http://localhost/admin')
+
+        self.assertFalse(is_valid)
+        self.assertIn('blocked', error.lower())
+
+    def test_validate_url_rejects_metadata_hostname(self):
+        """validate_url should reject cloud metadata hostnames."""
+        from rag_system.ingestion.crawler import validate_url
+
+        is_valid, error = validate_url('http://metadata.google.internal/')
+
+        self.assertFalse(is_valid)
+        self.assertIn('blocked', error.lower())
+
+    def test_validate_url_allows_private_when_enabled(self):
+        """validate_url should allow localhost when allow_private=True."""
+        from rag_system.ingestion.crawler import validate_url
+
+        is_valid, error = validate_url('http://localhost/admin', allow_private=True)
+
+        self.assertTrue(is_valid)
+
+    def test_validate_url_or_raise_raises(self):
+        """validate_url_or_raise should raise URLValidationError."""
+        from rag_system.ingestion.crawler import validate_url_or_raise, URLValidationError
+
+        with self.assertRaises(URLValidationError) as ctx:
+            validate_url_or_raise('file:///etc/passwd')
+
+        self.assertEqual(ctx.exception.url, 'file:///etc/passwd')
+
+
+class TestCrawlStats(unittest.TestCase):
+    """Test CrawlStats class."""
+
+    def test_crawl_stats_initialization(self):
+        """CrawlStats should initialize with zeros."""
+        from rag_system.ingestion.crawler import CrawlStats
+
+        stats = CrawlStats()
+
+        self.assertEqual(stats.pages_succeeded, 0)
+        self.assertEqual(stats.pages_failed, 0)
+        self.assertEqual(stats.pages_skipped, 0)
+        self.assertEqual(len(stats.errors), 0)
+
+    def test_crawl_stats_record_success(self):
+        """record_success should increment pages_succeeded."""
+        from rag_system.ingestion.crawler import CrawlStats
+
+        stats = CrawlStats()
+        stats.record_success()
+        stats.record_success()
+
+        self.assertEqual(stats.pages_succeeded, 2)
+
+    def test_crawl_stats_record_failure(self):
+        """record_failure should increment pages_failed and add error."""
+        from rag_system.ingestion.crawler import CrawlStats
+
+        stats = CrawlStats()
+        stats.record_failure('https://example.com/page', 'HTTP 404')
+
+        self.assertEqual(stats.pages_failed, 1)
+        self.assertEqual(len(stats.errors), 1)
+        self.assertEqual(stats.errors[0]['url'], 'https://example.com/page')
+        self.assertEqual(stats.errors[0]['error'], 'HTTP 404')
+
+    def test_crawl_stats_record_skip(self):
+        """record_skip should increment pages_skipped."""
+        from rag_system.ingestion.crawler import CrawlStats
+
+        stats = CrawlStats()
+        stats.record_skip()
+
+        self.assertEqual(stats.pages_skipped, 1)
+
+    def test_crawl_stats_to_dict(self):
+        """to_dict should return all stats as dictionary."""
+        from rag_system.ingestion.crawler import CrawlStats
+
+        stats = CrawlStats()
+        stats.record_success()
+        stats.record_failure('https://example.com', 'error')
+        stats.record_skip()
+
+        result = stats.to_dict()
+
+        self.assertEqual(result['pages_succeeded'], 1)
+        self.assertEqual(result['pages_failed'], 1)
+        self.assertEqual(result['pages_skipped'], 1)
+        self.assertEqual(result['total_errors'], 1)
+        self.assertEqual(len(result['errors']), 1)
+
+
+class TestHTTPCache(unittest.TestCase):
+    """Test HTTPCache class."""
+
+    def setUp(self):
+        """Set up test cache directory."""
+        import tempfile
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        """Clean up test cache directory."""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_cache_put_and_get(self):
+        """HTTPCache should store and retrieve responses."""
+        from rag_system.ingestion.crawler import HTTPCache
+
+        cache = HTTPCache(self.temp_dir)
+        cache.put('https://example.com/page', '<html>content</html>', 200)
+
+        result = cache.get('https://example.com/page')
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], '<html>content</html>')
+        self.assertEqual(result[1], 200)
+
+    def test_cache_get_missing(self):
+        """HTTPCache should return None for missing URLs."""
+        from rag_system.ingestion.crawler import HTTPCache
+
+        cache = HTTPCache(self.temp_dir)
+
+        result = cache.get('https://example.com/nonexistent')
+
+        self.assertIsNone(result)
+
+    def test_cache_handles_corrupted_json(self):
+        """HTTPCache should handle corrupted cache files."""
+        from rag_system.ingestion.crawler import HTTPCache
+        import hashlib
+        import os
+
+        cache = HTTPCache(self.temp_dir)
+        url = 'https://example.com/corrupted'
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        cache_path = os.path.join(self.temp_dir, f"{url_hash}.json")
+
+        # Write corrupted JSON
+        with open(cache_path, 'w') as f:
+            f.write('not valid json {{{')
+
+        # Should return None and remove corrupted file
+        result = cache.get(url)
+
+        self.assertIsNone(result)
+        # Corrupted file should be removed
+        self.assertFalse(os.path.exists(cache_path))
+
+    def test_cache_handles_empty_file(self):
+        """HTTPCache should handle empty cache files."""
+        from rag_system.ingestion.crawler import HTTPCache
+        import hashlib
+        import os
+
+        cache = HTTPCache(self.temp_dir)
+        url = 'https://example.com/empty'
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        cache_path = os.path.join(self.temp_dir, f"{url_hash}.json")
+
+        # Write empty file
+        with open(cache_path, 'w') as f:
+            f.write('')
+
+        # Should return None
+        result = cache.get(url)
+
+        self.assertIsNone(result)
+
+    def test_cache_handles_missing_fields(self):
+        """HTTPCache should handle cache files with missing fields."""
+        from rag_system.ingestion.crawler import HTTPCache
+        import hashlib
+        import os
+        import json
+
+        cache = HTTPCache(self.temp_dir)
+        url = 'https://example.com/incomplete'
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        cache_path = os.path.join(self.temp_dir, f"{url_hash}.json")
+
+        # Write JSON with missing required fields
+        with open(cache_path, 'w') as f:
+            json.dump({'url': url}, f)  # Missing 'content' and 'status'
+
+        # Should return None
+        result = cache.get(url)
+
+        self.assertIsNone(result)
+
+
+class TestCrawlerWithStats(unittest.TestCase):
+    """Test Crawler class with statistics tracking."""
+
+    def test_crawler_tracks_success_stats(self):
+        """Crawler should track successful page fetches."""
+        from rag_system.ingestion.crawler import Crawler
+
+        crawler = Crawler(
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=2,
+            delay=0
+        )
+
+        def mock_fetch(url):
+            return '<html><a href="/page2">Link</a></html>', 200
+
+        with patch.object(crawler, '_fetch_url', side_effect=mock_fetch):
+            list(crawler.crawl())
+
+        stats = crawler.get_stats()
+        self.assertEqual(stats.pages_succeeded, 2)
+        self.assertEqual(stats.pages_failed, 0)
+
+    def test_crawler_tracks_failure_stats(self):
+        """Crawler should track failed page fetches."""
+        from rag_system.ingestion.crawler import Crawler, FetchError
+
+        crawler = Crawler(
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=5,
+            delay=0
+        )
+
+        call_count = [0]
+
+        def mock_fetch(url):
+            call_count[0] += 1
+            if call_count[0] <= 1:
+                return '<html><a href="/page2">Link</a><a href="/page3">Link</a></html>', 200
+            else:
+                raise FetchError(url, 'HTTP 500', status_code=500)
+
+        with patch.object(crawler, '_fetch_url', side_effect=mock_fetch):
+            list(crawler.crawl())
+
+        stats = crawler.get_stats()
+        self.assertEqual(stats.pages_succeeded, 1)
+        self.assertEqual(stats.pages_failed, 2)
+
+    def test_get_stats_returns_crawl_stats(self):
+        """get_stats should return CrawlStats object."""
+        from rag_system.ingestion.crawler import Crawler, CrawlStats
+
+        crawler = Crawler(
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=1,
+            delay=0
+        )
+
+        stats = crawler.get_stats()
+
+        self.assertIsInstance(stats, CrawlStats)
+
+
+class TestCrawlerURLValidation(unittest.TestCase):
+    """Test Crawler URL validation integration."""
+
+    def test_crawler_validates_start_url(self):
+        """Crawler should validate URLs before fetching."""
+        from rag_system.ingestion.crawler import Crawler, URLValidationError
+
+        crawler = Crawler(
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=5,
+            delay=0
+        )
+
+        # Try to fetch a URL that should fail validation
+        with self.assertRaises(URLValidationError):
+            crawler._fetch_url('file:///etc/passwd')
+
+    def test_crawler_allows_private_when_configured(self):
+        """Crawler should allow private URLs when allow_private_urls=True."""
+        from rag_system.ingestion.crawler import Crawler
+
+        crawler = Crawler(
+            start_url='http://localhost',
+            allowed_domains=['localhost'],
+            max_pages=1,
+            delay=0,
+            allow_private_urls=True
+        )
+
+        # Mock the network fetch to avoid actual connection
+        def mock_network_fetch(url):
+            return '<html>test</html>', 200
+
+        with patch.object(crawler, '_fetch_url_from_network', side_effect=mock_network_fetch):
+            # Should not raise URLValidationError
+            content, status = crawler._fetch_url('http://localhost/page')
+
+        self.assertEqual(status, 200)
 
 
 if __name__ == '__main__':
