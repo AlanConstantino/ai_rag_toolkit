@@ -1,11 +1,97 @@
 """Database module for the RAG system.
 
 Provides SQLite database initialization and helper functions for CRUD operations.
+Includes error handling, retry logic, and transaction management for production use.
 """
 
 import sqlite3
 import json
-from typing import Optional, List, Dict, Any
+import time
+import functools
+from contextlib import contextmanager
+from typing import Optional, List, Dict, Any, Generator, Callable, TypeVar
+
+# Type variable for generic decorator
+T = TypeVar('T')
+
+
+# =============================================================================
+# Custom Exceptions
+# =============================================================================
+
+class DatabaseError(Exception):
+    """Base exception for database operations."""
+    pass
+
+
+class ConnectionError(DatabaseError):
+    """Raised when database connection fails."""
+    pass
+
+
+class TransactionError(DatabaseError):
+    """Raised when a transaction fails."""
+    pass
+
+
+class IntegrityConstraintError(DatabaseError):
+    """Raised when an integrity constraint is violated (e.g., duplicate key)."""
+    pass
+
+
+class QueryError(DatabaseError):
+    """Raised when a query execution fails."""
+    pass
+
+
+# =============================================================================
+# Retry Decorator
+# =============================================================================
+
+def retry_on_error(
+    max_retries: int = 3,
+    retry_delay: float = 0.5,
+    exponential_backoff: bool = True,
+    retryable_errors: tuple = (sqlite3.OperationalError,)
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator to retry database operations on transient errors.
+
+    Args:
+        max_retries: Maximum number of retry attempts.
+        retry_delay: Initial delay between retries in seconds.
+        exponential_backoff: If True, double delay after each retry.
+        retryable_errors: Tuple of exception types that trigger retry.
+
+    Returns:
+        Decorated function with retry logic.
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            last_exception = None
+            delay = retry_delay
+
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except retryable_errors as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        time.sleep(delay)
+                        if exponential_backoff:
+                            delay *= 2
+                    else:
+                        raise ConnectionError(
+                            f"Database operation failed after {max_retries + 1} attempts: {e}"
+                        ) from e
+
+            # Should never reach here, but satisfy type checker
+            raise ConnectionError(
+                f"Database operation failed: {last_exception}"
+            ) from last_exception
+
+        return wrapper
+    return decorator
 
 
 # =============================================================================
@@ -163,18 +249,26 @@ CREATE INDEX IF NOT EXISTS idx_doc_terms_chunk ON doc_terms(chunk_id);
 # Connection Management
 # =============================================================================
 
+@retry_on_error(max_retries=3, retry_delay=0.5)
 def init_db(db_path: str) -> None:
     """Initialize the database with the schema.
 
+    Uses context manager to ensure connection is properly closed.
+
     Args:
         db_path: Path to the SQLite database file.
+
+    Raises:
+        ConnectionError: If database initialization fails after retries.
     """
-    conn = sqlite3.connect(db_path)
-    conn.executescript(SCHEMA)
-    conn.commit()
-    conn.close()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.executescript(SCHEMA)
+    except sqlite3.Error as e:
+        raise DatabaseError(f"Failed to initialize database: {e}") from e
 
 
+@retry_on_error(max_retries=3, retry_delay=0.5)
 def get_connection(db_path: str) -> sqlite3.Connection:
     """Get a database connection with foreign keys enabled.
 
@@ -183,11 +277,54 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 
     Returns:
         A sqlite3 Connection object.
+
+    Raises:
+        ConnectionError: If connection fails after retries.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+    except sqlite3.Error as e:
+        raise ConnectionError(f"Failed to connect to database: {e}") from e
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Generator[sqlite3.Connection, None, None]:
+    """Context manager for database transactions.
+
+    Provides atomic transaction semantics - commits on success, rolls back on error.
+
+    Args:
+        conn: Database connection to use for the transaction.
+
+    Yields:
+        The connection object for use within the transaction.
+
+    Raises:
+        TransactionError: If the transaction fails.
+
+    Example:
+        with transaction(conn) as tx:
+            insert_page(tx, ...)
+            insert_chunk(tx, ...)
+        # Both operations commit together or neither does
+    """
+    try:
+        yield conn
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise IntegrityConstraintError(
+            f"Integrity constraint violated: {e}"
+        ) from e
+    except sqlite3.Error as e:
+        conn.rollback()
+        raise TransactionError(f"Transaction failed: {e}") from e
+    except Exception as e:
+        conn.rollback()
+        raise TransactionError(f"Transaction failed due to unexpected error: {e}") from e
 
 
 # =============================================================================
@@ -196,7 +333,8 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 
 def insert_page(conn: sqlite3.Connection, url: str, title: str,
                 raw_html: str, parsed_text: str, content_hash: str,
-                summary: Optional[str] = None) -> int:
+                summary: Optional[str] = None,
+                auto_commit: bool = True) -> int:
     """Insert a page into the database.
 
     Args:
@@ -207,17 +345,34 @@ def insert_page(conn: sqlite3.Connection, url: str, title: str,
         parsed_text: Extracted text content.
         content_hash: Hash of the content for change detection.
         summary: Optional page summary.
+        auto_commit: If True, commit after insert. Set False when using transaction().
 
     Returns:
         The ID of the inserted page.
+
+    Raises:
+        IntegrityConstraintError: If a page with the same URL already exists.
+        QueryError: If the insert fails for other reasons.
     """
-    cursor = conn.execute(
-        """INSERT INTO pages (url, title, raw_html, parsed_text, content_hash, summary)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (url, title, raw_html, parsed_text, content_hash, summary)
-    )
-    conn.commit()
-    return cursor.lastrowid
+    try:
+        cursor = conn.execute(
+            """INSERT INTO pages (url, title, raw_html, parsed_text, content_hash, summary)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (url, title, raw_html, parsed_text, content_hash, summary)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError as e:
+        if auto_commit:
+            conn.rollback()
+        raise IntegrityConstraintError(
+            f"Page with URL '{url}' already exists: {e}"
+        ) from e
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to insert page: {e}") from e
 
 
 def get_page_by_url(conn: sqlite3.Connection, url: str) -> Optional[Dict[str, Any]]:
@@ -229,22 +384,39 @@ def get_page_by_url(conn: sqlite3.Connection, url: str) -> Optional[Dict[str, An
 
     Returns:
         Page data as a dict, or None if not found.
+
+    Raises:
+        QueryError: If the query fails.
     """
-    cursor = conn.execute("SELECT * FROM pages WHERE url = ?", (url,))
-    row = cursor.fetchone()
-    return dict(row) if row else None
+    try:
+        cursor = conn.execute("SELECT * FROM pages WHERE url = ?", (url,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    except sqlite3.Error as e:
+        raise QueryError(f"Failed to get page by URL: {e}") from e
 
 
-def update_page_summary(conn: sqlite3.Connection, page_id: int, summary: str) -> None:
+def update_page_summary(conn: sqlite3.Connection, page_id: int, summary: str,
+                        auto_commit: bool = True) -> None:
     """Update the summary for a page.
 
     Args:
         conn: Database connection.
         page_id: ID of the page to update.
         summary: New summary text.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If the update fails.
     """
-    conn.execute("UPDATE pages SET summary = ? WHERE id = ?", (summary, page_id))
-    conn.commit()
+    try:
+        conn.execute("UPDATE pages SET summary = ? WHERE id = ?", (summary, page_id))
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update page summary: {e}") from e
 
 
 def get_all_pages(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -267,7 +439,8 @@ def get_all_pages(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
 def insert_chunk(conn: sqlite3.Connection, page_id: int, chunk_type: str,
                  chunk_index: int, content: str, heading_path: str,
                  parent_chunk_id: Optional[int] = None,
-                 embedding: Optional[List[float]] = None) -> int:
+                 embedding: Optional[List[float]] = None,
+                 auto_commit: bool = True) -> int:
     """Insert a chunk into the database.
 
     Args:
@@ -279,20 +452,37 @@ def insert_chunk(conn: sqlite3.Connection, page_id: int, chunk_type: str,
         heading_path: Heading hierarchy path (e.g., "Section > Subsection").
         parent_chunk_id: Optional ID of parent chunk (for small chunks).
         embedding: Optional embedding vector.
+        auto_commit: If True, commit after insert.
 
     Returns:
         The ID of the inserted chunk.
+
+    Raises:
+        IntegrityConstraintError: If foreign key constraint is violated.
+        QueryError: If the insert fails for other reasons.
     """
-    embedding_json = json.dumps(embedding) if embedding else None
-    cursor = conn.execute(
-        """INSERT INTO chunks (page_id, parent_chunk_id, chunk_type, chunk_index,
-                              content, heading_path, embedding_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (page_id, parent_chunk_id, chunk_type, chunk_index, content,
-         heading_path, embedding_json)
-    )
-    conn.commit()
-    return cursor.lastrowid
+    try:
+        embedding_json = json.dumps(embedding) if embedding else None
+        cursor = conn.execute(
+            """INSERT INTO chunks (page_id, parent_chunk_id, chunk_type, chunk_index,
+                                  content, heading_path, embedding_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (page_id, parent_chunk_id, chunk_type, chunk_index, content,
+             heading_path, embedding_json)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError as e:
+        if auto_commit:
+            conn.rollback()
+        raise IntegrityConstraintError(
+            f"Failed to insert chunk (invalid page_id or parent_chunk_id?): {e}"
+        ) from e
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to insert chunk: {e}") from e
 
 
 def get_chunks_by_page(conn: sqlite3.Connection, page_id: int) -> List[Dict[str, Any]]:
@@ -325,18 +515,29 @@ def get_chunk_by_id(conn: sqlite3.Connection, chunk_id: int) -> Optional[Dict[st
 
 
 def update_chunk_embedding(conn: sqlite3.Connection, chunk_id: int,
-                          embedding: List[float]) -> None:
+                          embedding: List[float],
+                          auto_commit: bool = True) -> None:
     """Update the embedding for a chunk.
 
     Args:
         conn: Database connection.
         chunk_id: ID of the chunk.
         embedding: Embedding vector.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If the update fails.
     """
-    embedding_json = json.dumps(embedding)
-    conn.execute("UPDATE chunks SET embedding_json = ? WHERE id = ?",
-                (embedding_json, chunk_id))
-    conn.commit()
+    try:
+        embedding_json = json.dumps(embedding)
+        conn.execute("UPDATE chunks SET embedding_json = ? WHERE id = ?",
+                    (embedding_json, chunk_id))
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update chunk embedding: {e}") from e
 
 
 def get_all_chunks_with_embeddings(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -354,7 +555,8 @@ def get_all_chunks_with_embeddings(conn: sqlite3.Connection) -> List[Dict[str, A
     return [dict(row) for row in cursor.fetchall()]
 
 
-def delete_chunks_by_page(conn: sqlite3.Connection, page_id: int) -> int:
+def delete_chunks_by_page(conn: sqlite3.Connection, page_id: int,
+                         auto_commit: bool = True) -> int:
     """Delete all chunks for a page.
 
     Used when re-indexing a page whose content has changed.
@@ -362,16 +564,27 @@ def delete_chunks_by_page(conn: sqlite3.Connection, page_id: int) -> int:
     Args:
         conn: Database connection.
         page_id: ID of the page whose chunks should be deleted.
+        auto_commit: If True, commit after delete.
 
     Returns:
         Number of chunks deleted.
+
+    Raises:
+        QueryError: If the delete fails.
     """
-    cursor = conn.execute("DELETE FROM chunks WHERE page_id = ?", (page_id,))
-    conn.commit()
-    return cursor.rowcount
+    try:
+        cursor = conn.execute("DELETE FROM chunks WHERE page_id = ?", (page_id,))
+        if auto_commit:
+            conn.commit()
+        return cursor.rowcount
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to delete chunks for page: {e}") from e
 
 
-def delete_doc_terms_by_page(conn: sqlite3.Connection, page_id: int) -> int:
+def delete_doc_terms_by_page(conn: sqlite3.Connection, page_id: int,
+                             auto_commit: bool = True) -> int:
     """Delete all BM25 doc_terms entries for a page's chunks.
 
     Used when re-indexing a page whose content has changed.
@@ -379,21 +592,31 @@ def delete_doc_terms_by_page(conn: sqlite3.Connection, page_id: int) -> int:
     Args:
         conn: Database connection.
         page_id: ID of the page whose terms should be deleted.
+        auto_commit: If True, commit after delete.
 
     Returns:
         Number of term entries deleted.
+
+    Raises:
+        QueryError: If the delete fails.
     """
-    cursor = conn.execute(
-        "DELETE FROM doc_terms WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?)",
-        (page_id,)
-    )
-    conn.commit()
-    return cursor.rowcount
+    try:
+        cursor = conn.execute(
+            "DELETE FROM doc_terms WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?)",
+            (page_id,)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.rowcount
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to delete doc terms for page: {e}") from e
 
 
 def update_page_content(conn: sqlite3.Connection, page_id: int,
                         title: str, raw_html: str, parsed_text: str,
-                        content_hash: str) -> None:
+                        content_hash: str, auto_commit: bool = True) -> None:
     """Update a page's content fields.
 
     Used when re-indexing a page whose content has changed.
@@ -405,12 +628,22 @@ def update_page_content(conn: sqlite3.Connection, page_id: int,
         raw_html: New raw HTML content.
         parsed_text: New parsed text content.
         content_hash: New content hash.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If the update fails.
     """
-    conn.execute(
-        "UPDATE pages SET title = ?, raw_html = ?, parsed_text = ?, content_hash = ?, crawled_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (title, raw_html, parsed_text, content_hash, page_id)
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            "UPDATE pages SET title = ?, raw_html = ?, parsed_text = ?, content_hash = ?, crawled_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (title, raw_html, parsed_text, content_hash, page_id)
+        )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update page content: {e}") from e
 
 
 # =============================================================================
@@ -419,7 +652,8 @@ def update_page_content(conn: sqlite3.Connection, page_id: int,
 
 def insert_entity(conn: sqlite3.Connection, name: str, entity_type: str,
                   description: str, page_id: Optional[int] = None,
-                  normalized_name: Optional[str] = None) -> int:
+                  normalized_name: Optional[str] = None,
+                  auto_commit: bool = True) -> int:
     """Insert an entity into the database.
 
     Args:
@@ -429,19 +663,34 @@ def insert_entity(conn: sqlite3.Connection, name: str, entity_type: str,
         description: Entity description.
         page_id: Optional ID of the source page.
         normalized_name: Optional normalized name for deduplication.
+        auto_commit: If True, commit after insert.
 
     Returns:
         The ID of the inserted entity.
+
+    Raises:
+        IntegrityConstraintError: If foreign key constraint is violated.
+        QueryError: If the insert fails.
     """
-    if normalized_name is None:
-        normalized_name = name.strip().lower()
-    cursor = conn.execute(
-        """INSERT INTO entities (name, type, description, page_id, normalized_name)
-           VALUES (?, ?, ?, ?, ?)""",
-        (name, entity_type, description, page_id, normalized_name)
-    )
-    conn.commit()
-    return cursor.lastrowid
+    try:
+        if normalized_name is None:
+            normalized_name = name.strip().lower()
+        cursor = conn.execute(
+            """INSERT INTO entities (name, type, description, page_id, normalized_name)
+               VALUES (?, ?, ?, ?, ?)""",
+            (name, entity_type, description, page_id, normalized_name)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError as e:
+        if auto_commit:
+            conn.rollback()
+        raise IntegrityConstraintError(f"Failed to insert entity: {e}") from e
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to insert entity: {e}") from e
 
 
 def get_entity_by_name(conn: sqlite3.Connection, name: str) -> Optional[Dict[str, Any]]:
@@ -461,7 +710,7 @@ def get_entity_by_name(conn: sqlite3.Connection, name: str) -> Optional[Dict[str
 
 def insert_relationship(conn: sqlite3.Connection, source_entity_id: int,
                        target_entity_id: int, relationship_type: str,
-                       description: str) -> int:
+                       description: str, auto_commit: bool = True) -> int:
     """Insert a relationship between entities.
 
     Args:
@@ -470,34 +719,59 @@ def insert_relationship(conn: sqlite3.Connection, source_entity_id: int,
         target_entity_id: ID of the target entity.
         relationship_type: Type of relationship.
         description: Relationship description.
+        auto_commit: If True, commit after insert.
 
     Returns:
         The ID of the inserted relationship.
+
+    Raises:
+        IntegrityConstraintError: If entity IDs don't exist.
+        QueryError: If the insert fails.
     """
-    cursor = conn.execute(
-        """INSERT INTO relationships (source_entity_id, target_entity_id,
-                                     type, description)
-           VALUES (?, ?, ?, ?)""",
-        (source_entity_id, target_entity_id, relationship_type, description)
-    )
-    conn.commit()
-    return cursor.lastrowid
+    try:
+        cursor = conn.execute(
+            """INSERT INTO relationships (source_entity_id, target_entity_id,
+                                         type, description)
+               VALUES (?, ?, ?, ?)""",
+            (source_entity_id, target_entity_id, relationship_type, description)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError as e:
+        if auto_commit:
+            conn.rollback()
+        raise IntegrityConstraintError(f"Failed to insert relationship: {e}") from e
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to insert relationship: {e}") from e
 
 
 def link_chunk_to_entity(conn: sqlite3.Connection, chunk_id: int,
-                         entity_id: int) -> None:
+                         entity_id: int, auto_commit: bool = True) -> None:
     """Create a link between a chunk and an entity.
 
     Args:
         conn: Database connection.
         chunk_id: ID of the chunk.
         entity_id: ID of the entity.
+        auto_commit: If True, commit after insert.
+
+    Raises:
+        QueryError: If the link fails.
     """
-    conn.execute(
-        "INSERT OR IGNORE INTO chunk_entities (chunk_id, entity_id) VALUES (?, ?)",
-        (chunk_id, entity_id)
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO chunk_entities (chunk_id, entity_id) VALUES (?, ?)",
+            (chunk_id, entity_id)
+        )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to link chunk to entity: {e}") from e
 
 
 def get_entities_for_chunk(conn: sqlite3.Connection,
@@ -525,20 +799,35 @@ def get_entities_for_chunk(conn: sqlite3.Connection,
 # =============================================================================
 
 def insert_doc_terms(conn: sqlite3.Connection, chunk_id: int,
-                     terms: Dict[str, int]) -> None:
+                     terms: Dict[str, int], auto_commit: bool = True) -> None:
     """Insert term frequencies for a chunk.
 
     Args:
         conn: Database connection.
         chunk_id: ID of the chunk.
         terms: Dict mapping terms to their frequencies.
+        auto_commit: If True, commit after all inserts.
+
+    Raises:
+        IntegrityConstraintError: If chunk_id doesn't exist.
+        QueryError: If the insert fails.
     """
-    for term, freq in terms.items():
-        conn.execute(
-            "INSERT INTO doc_terms (chunk_id, term, term_frequency) VALUES (?, ?, ?)",
-            (chunk_id, term, freq)
-        )
-    conn.commit()
+    try:
+        for term, freq in terms.items():
+            conn.execute(
+                "INSERT INTO doc_terms (chunk_id, term, term_frequency) VALUES (?, ?, ?)",
+                (chunk_id, term, freq)
+            )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.IntegrityError as e:
+        if auto_commit:
+            conn.rollback()
+        raise IntegrityConstraintError(f"Failed to insert doc terms: {e}") from e
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to insert doc terms: {e}") from e
 
 
 def get_doc_terms(conn: sqlite3.Connection, chunk_id: int) -> Dict[str, int]:
@@ -559,21 +848,31 @@ def get_doc_terms(conn: sqlite3.Connection, chunk_id: int) -> Dict[str, int]:
 
 
 def update_corpus_stats(conn: sqlite3.Connection, total_docs: int,
-                        avg_doc_length: float) -> None:
+                        avg_doc_length: float, auto_commit: bool = True) -> None:
     """Update corpus statistics.
 
     Args:
         conn: Database connection.
         total_docs: Total number of documents.
         avg_doc_length: Average document length.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If the update fails.
     """
-    # Delete existing stats and insert new
-    conn.execute("DELETE FROM corpus_stats")
-    conn.execute(
-        "INSERT INTO corpus_stats (total_docs, avg_doc_length) VALUES (?, ?)",
-        (total_docs, avg_doc_length)
-    )
-    conn.commit()
+    try:
+        # Delete existing stats and insert new
+        conn.execute("DELETE FROM corpus_stats")
+        conn.execute(
+            "INSERT INTO corpus_stats (total_docs, avg_doc_length) VALUES (?, ?)",
+            (total_docs, avg_doc_length)
+        )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update corpus stats: {e}") from e
 
 
 def get_corpus_stats(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
@@ -591,20 +890,31 @@ def get_corpus_stats(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
 
 
 def update_term_doc_frequencies(conn: sqlite3.Connection,
-                                term_freqs: Dict[str, int]) -> None:
+                                term_freqs: Dict[str, int],
+                                auto_commit: bool = True) -> None:
     """Update term document frequencies.
 
     Args:
         conn: Database connection.
         term_freqs: Dict mapping terms to document frequencies.
+        auto_commit: If True, commit after all updates.
+
+    Raises:
+        QueryError: If the update fails.
     """
-    for term, freq in term_freqs.items():
-        conn.execute(
-            """INSERT OR REPLACE INTO term_doc_frequencies (term, doc_frequency)
-               VALUES (?, ?)""",
-            (term, freq)
-        )
-    conn.commit()
+    try:
+        for term, freq in term_freqs.items():
+            conn.execute(
+                """INSERT OR REPLACE INTO term_doc_frequencies (term, doc_frequency)
+                   VALUES (?, ?)""",
+                (term, freq)
+            )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update term doc frequencies: {e}") from e
 
 
 def get_term_doc_frequency(conn: sqlite3.Connection, term: str) -> int:
@@ -629,16 +939,27 @@ def get_term_doc_frequency(conn: sqlite3.Connection, term: str) -> int:
 # Summary Operations
 # =============================================================================
 
-def set_global_summary(conn: sqlite3.Connection, summary: str) -> None:
+def set_global_summary(conn: sqlite3.Connection, summary: str,
+                       auto_commit: bool = True) -> None:
     """Set or replace the global summary.
 
     Args:
         conn: Database connection.
         summary: Global summary text.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If the update fails.
     """
-    conn.execute("DELETE FROM global_summary")
-    conn.execute("INSERT INTO global_summary (content) VALUES (?)", (summary,))
-    conn.commit()
+    try:
+        conn.execute("DELETE FROM global_summary")
+        conn.execute("INSERT INTO global_summary (content) VALUES (?)", (summary,))
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to set global summary: {e}") from e
 
 
 def get_global_summary(conn: sqlite3.Connection) -> Optional[str]:
@@ -656,7 +977,7 @@ def get_global_summary(conn: sqlite3.Connection) -> Optional[str]:
 
 
 def insert_system(conn: sqlite3.Connection, name: str, description: str,
-                  summary: str) -> int:
+                  summary: str, auto_commit: bool = True) -> int:
     """Insert a system entry.
 
     Args:
@@ -664,16 +985,26 @@ def insert_system(conn: sqlite3.Connection, name: str, description: str,
         name: System name.
         description: System description.
         summary: System summary.
+        auto_commit: If True, commit after insert.
 
     Returns:
         The ID of the inserted system.
+
+    Raises:
+        QueryError: If the insert fails.
     """
-    cursor = conn.execute(
-        "INSERT INTO systems (name, description, summary) VALUES (?, ?, ?)",
-        (name, description, summary)
-    )
-    conn.commit()
-    return cursor.lastrowid
+    try:
+        cursor = conn.execute(
+            "INSERT INTO systems (name, description, summary) VALUES (?, ?, ?)",
+            (name, description, summary)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to insert system: {e}") from e
 
 
 def get_system_by_name(conn: sqlite3.Connection, name: str) -> Optional[Dict[str, Any]]:
@@ -696,7 +1027,8 @@ def get_system_by_name(conn: sqlite3.Connection, name: str) -> Optional[Dict[str
 # =============================================================================
 
 def cache_query(conn: sqlite3.Connection, query_hash: str, query_type: str,
-                expanded_queries: List[str], embedding: List[float]) -> None:
+                expanded_queries: List[str], embedding: List[float],
+                auto_commit: bool = True) -> None:
     """Cache a query's processed information.
 
     Args:
@@ -705,14 +1037,24 @@ def cache_query(conn: sqlite3.Connection, query_hash: str, query_type: str,
         query_type: Classified query type.
         expanded_queries: List of expanded query variations.
         embedding: Query embedding vector.
+        auto_commit: If True, commit after insert.
+
+    Raises:
+        QueryError: If the cache operation fails.
     """
-    conn.execute(
-        """INSERT OR REPLACE INTO query_cache
-           (query_hash, query_type, expanded_queries, embedding_json)
-           VALUES (?, ?, ?, ?)""",
-        (query_hash, query_type, json.dumps(expanded_queries), json.dumps(embedding))
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO query_cache
+               (query_hash, query_type, expanded_queries, embedding_json)
+               VALUES (?, ?, ?, ?)""",
+            (query_hash, query_type, json.dumps(expanded_queries), json.dumps(embedding))
+        )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to cache query: {e}") from e
 
 
 def get_cached_query(conn: sqlite3.Connection,
@@ -735,7 +1077,8 @@ def get_cached_query(conn: sqlite3.Connection,
 
 def log_query(conn: sqlite3.Connection, query: str, query_type: str,
               expanded_queries: List[str], retrieved_chunk_ids: List[int],
-              confidence_score: float, answer_generated: bool) -> int:
+              confidence_score: float, answer_generated: bool,
+              auto_commit: bool = True) -> int:
     """Log a query execution.
 
     Args:
@@ -746,20 +1089,30 @@ def log_query(conn: sqlite3.Connection, query: str, query_type: str,
         retrieved_chunk_ids: IDs of retrieved chunks.
         confidence_score: Confidence score.
         answer_generated: Whether an answer was generated.
+        auto_commit: If True, commit after insert.
 
     Returns:
         The ID of the log entry.
+
+    Raises:
+        QueryError: If logging fails.
     """
-    cursor = conn.execute(
-        """INSERT INTO query_log
-           (query, query_type, expanded_queries, retrieved_chunk_ids,
-            confidence_score, answer_generated)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (query, query_type, json.dumps(expanded_queries),
-         json.dumps(retrieved_chunk_ids), confidence_score, answer_generated)
-    )
-    conn.commit()
-    return cursor.lastrowid
+    try:
+        cursor = conn.execute(
+            """INSERT INTO query_log
+               (query, query_type, expanded_queries, retrieved_chunk_ids,
+                confidence_score, answer_generated)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (query, query_type, json.dumps(expanded_queries),
+             json.dumps(retrieved_chunk_ids), confidence_score, answer_generated)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to log query: {e}") from e
 
 
 def get_query_logs(conn: sqlite3.Connection,
