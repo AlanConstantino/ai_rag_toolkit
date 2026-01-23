@@ -45,7 +45,10 @@ Run this first! Checks your Python version, helps create a `.env` file with your
 ./scripts/crawl.sh https://docs.python.org/3/
 ./scripts/crawl.sh https://fastapi.tiangolo.com --max-pages 100
 ./scripts/crawl.sh https://example.com --ignore-robots  # Use responsibly!
+./scripts/crawl.sh https://example.com --fresh          # Start fresh crawl
 ```
+
+**Resume support:** If you interrupt a crawl with Ctrl+C, progress is saved automatically. Run the same command again to resume. Use `--fresh` to start over.
 
 ### query.sh
 ```bash

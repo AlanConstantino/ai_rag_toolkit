@@ -278,5 +278,269 @@ class TestIndexStats(unittest.TestCase):
         self.assertGreater(stats['total_chunks'], 0)
 
 
+class TestCrawlSessionIntegration(unittest.TestCase):
+    """Test crawl session integration with indexer."""
+
+    def setUp(self):
+        """Create temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_crawl_and_index_creates_session(self):
+        """crawl_and_index should create a crawl session."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, list_crawl_sessions
+
+        indexer = Indexer(self.temp_path)
+
+        # Mock crawler to return one page
+        def mock_crawl_generator():
+            yield {
+                'url': 'https://example.com',
+                'html': '<html><body>Test</body></html>',
+                'status_code': 200
+            }
+
+        with patch('rag_system.ingestion.indexer.Crawler') as MockCrawler:
+            mock_crawler = MagicMock()
+            mock_crawler.crawl.return_value = mock_crawl_generator()
+            mock_crawler.queue = []
+            mock_crawler.visited = {'https://example.com'}
+            MockCrawler.return_value = mock_crawler
+
+            indexer.crawl_and_index(
+                start_url='https://example.com',
+                allowed_domains=['example.com'],
+                max_pages=10
+            )
+
+        conn = get_connection(self.temp_path)
+        sessions = list_crawl_sessions(conn)
+        conn.close()
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]['start_url'], 'https://example.com')
+
+    def test_crawl_and_index_marks_session_completed(self):
+        """crawl_and_index should mark session as completed when done."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, list_crawl_sessions
+
+        indexer = Indexer(self.temp_path)
+
+        def mock_crawl_generator():
+            yield {
+                'url': 'https://example.com',
+                'html': '<html><body>Test</body></html>',
+                'status_code': 200
+            }
+
+        with patch('rag_system.ingestion.indexer.Crawler') as MockCrawler:
+            mock_crawler = MagicMock()
+            mock_crawler.crawl.return_value = mock_crawl_generator()
+            mock_crawler.queue = []
+            mock_crawler.visited = {'https://example.com'}
+            MockCrawler.return_value = mock_crawler
+
+            indexer.crawl_and_index(
+                start_url='https://example.com',
+                allowed_domains=['example.com'],
+                max_pages=10
+            )
+
+        conn = get_connection(self.temp_path)
+        sessions = list_crawl_sessions(conn)
+        conn.close()
+
+        self.assertEqual(sessions[0]['status'], 'completed')
+
+    def test_crawl_and_index_resumes_interrupted_session(self):
+        """crawl_and_index should resume an interrupted session."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import (
+            get_connection, create_crawl_session, update_session_status,
+            add_urls_to_crawl_queue, get_crawl_session
+        )
+
+        # Create an interrupted session with URLs in queue
+        conn = get_connection(self.temp_path)
+        session_id = create_crawl_session(
+            conn, 'https://example.com', ['example.com'], 100
+        )
+        update_session_status(conn, session_id, 'interrupted')
+        add_urls_to_crawl_queue(conn, session_id, [
+            'https://example.com/page1',
+            'https://example.com/page2'
+        ])
+        conn.close()
+
+        indexer = Indexer(self.temp_path)
+
+        pages_yielded = []
+
+        def mock_crawl_generator():
+            for url in ['https://example.com/page1', 'https://example.com/page2']:
+                pages_yielded.append(url)
+                yield {
+                    'url': url,
+                    'html': '<html><body>Test</body></html>',
+                    'status_code': 200
+                }
+
+        with patch('rag_system.ingestion.indexer.Crawler') as MockCrawler:
+            mock_crawler = MagicMock()
+            mock_crawler.crawl.return_value = mock_crawl_generator()
+            mock_crawler.queue = []
+            mock_crawler.visited = set()
+            MockCrawler.return_value = mock_crawler
+
+            result = indexer.crawl_and_index(
+                start_url='https://example.com',
+                allowed_domains=['example.com'],
+                max_pages=100
+            )
+
+        # Should have resumed the existing session
+        conn = get_connection(self.temp_path)
+        session = get_crawl_session(conn, session_id)
+        conn.close()
+
+        self.assertEqual(session['status'], 'completed')
+
+    def test_crawl_and_index_fresh_ignores_existing_session(self):
+        """crawl_and_index with fresh=True should start a new session."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import (
+            get_connection, create_crawl_session, update_session_status,
+            list_crawl_sessions
+        )
+
+        # Create an interrupted session
+        conn = get_connection(self.temp_path)
+        session_id = create_crawl_session(
+            conn, 'https://example.com', ['example.com'], 100
+        )
+        update_session_status(conn, session_id, 'interrupted')
+        conn.close()
+
+        indexer = Indexer(self.temp_path)
+
+        def mock_crawl_generator():
+            yield {
+                'url': 'https://example.com',
+                'html': '<html><body>Test</body></html>',
+                'status_code': 200
+            }
+
+        with patch('rag_system.ingestion.indexer.Crawler') as MockCrawler:
+            mock_crawler = MagicMock()
+            mock_crawler.crawl.return_value = mock_crawl_generator()
+            mock_crawler.queue = []
+            mock_crawler.visited = {'https://example.com'}
+            MockCrawler.return_value = mock_crawler
+
+            indexer.crawl_and_index(
+                start_url='https://example.com',
+                allowed_domains=['example.com'],
+                max_pages=10,
+                fresh=True
+            )
+
+        conn = get_connection(self.temp_path)
+        sessions = list_crawl_sessions(conn)
+        conn.close()
+
+        # Should have two sessions (old interrupted + new completed)
+        self.assertEqual(len(sessions), 2)
+        # Most recent should be completed
+        self.assertEqual(sessions[0]['status'], 'completed')
+
+    def test_crawl_and_index_updates_session_stats(self):
+        """crawl_and_index should update session statistics."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, list_crawl_sessions
+
+        indexer = Indexer(self.temp_path)
+
+        def mock_crawl_generator():
+            for i in range(3):
+                yield {
+                    'url': f'https://example.com/page{i}',
+                    'html': '<html><body>Test content</body></html>',
+                    'status_code': 200
+                }
+
+        with patch('rag_system.ingestion.indexer.Crawler') as MockCrawler:
+            mock_crawler = MagicMock()
+            mock_crawler.crawl.return_value = mock_crawl_generator()
+            mock_crawler.queue = []
+            mock_crawler.visited = set()
+            MockCrawler.return_value = mock_crawler
+
+            indexer.crawl_and_index(
+                start_url='https://example.com',
+                allowed_domains=['example.com'],
+                max_pages=10
+            )
+
+        conn = get_connection(self.temp_path)
+        sessions = list_crawl_sessions(conn)
+        conn.close()
+
+        self.assertEqual(sessions[0]['pages_crawled'], 3)
+        self.assertGreaterEqual(sessions[0]['pages_indexed'], 0)
+
+    def test_crawl_and_index_saves_queue_on_interrupt(self):
+        """crawl_and_index should save queue when interrupted."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import (
+            get_connection, list_crawl_sessions, get_crawl_queue_urls
+        )
+
+        indexer = Indexer(self.temp_path)
+
+        # Simulate an interrupted crawl
+        def mock_crawl_generator():
+            yield {
+                'url': 'https://example.com',
+                'html': '<html><body>Test</body></html>',
+                'status_code': 200
+            }
+            # Simulate interrupt after first page
+            raise KeyboardInterrupt()
+
+        with patch('rag_system.ingestion.indexer.Crawler') as MockCrawler:
+            mock_crawler = MagicMock()
+            mock_crawler.crawl.return_value = mock_crawl_generator()
+            mock_crawler.queue = ['https://example.com/page1', 'https://example.com/page2']
+            mock_crawler.visited = {'https://example.com'}
+            MockCrawler.return_value = mock_crawler
+
+            try:
+                indexer.crawl_and_index(
+                    start_url='https://example.com',
+                    allowed_domains=['example.com'],
+                    max_pages=10
+                )
+            except KeyboardInterrupt:
+                pass  # Expected
+
+        conn = get_connection(self.temp_path)
+        sessions = list_crawl_sessions(conn)
+        # Queue should be saved
+        queue_urls = get_crawl_queue_urls(conn, sessions[0]['id'])
+        conn.close()
+
+        self.assertEqual(sessions[0]['status'], 'interrupted')
+        self.assertEqual(len(queue_urls), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

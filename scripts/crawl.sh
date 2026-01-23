@@ -13,11 +13,17 @@
 #   ./scripts/crawl.sh <url> --max-pages 100    # Limit to 100 pages
 #   ./scripts/crawl.sh <url> --unlimited        # Crawl ALL pages (no limit)
 #   ./scripts/crawl.sh <url> --ignore-robots    # Ignore robots.txt (use responsibly!)
+#   ./scripts/crawl.sh <url> --fresh            # Start fresh (ignore any saved session)
 #
 # EXAMPLES:
 #   ./scripts/crawl.sh https://docs.python.org/3/
 #   ./scripts/crawl.sh https://fastapi.tiangolo.com --max-pages 50
 #   ./scripts/crawl.sh https://docs.python.org/3.6/ --unlimited --ignore-robots
+#
+# RESUME SUPPORT:
+#   If you interrupt a crawl (Ctrl+C), the progress is automatically saved.
+#   Running the same command again will resume from where you left off.
+#   Use --fresh to discard any saved session and start over.
 #
 # REQUIREMENTS:
 #   - Python 3.6.5+

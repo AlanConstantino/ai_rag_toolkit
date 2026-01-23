@@ -239,6 +239,33 @@ CREATE TABLE IF NOT EXISTS query_log (
 );
 
 -- ============================================
+-- CRAWL SESSION MANAGEMENT
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS crawl_sessions (
+    id INTEGER PRIMARY KEY,
+    start_url TEXT NOT NULL,
+    allowed_domains TEXT NOT NULL,  -- JSON array
+    status TEXT DEFAULT 'active',   -- active, completed, interrupted
+    pages_crawled INTEGER DEFAULT 0,
+    pages_indexed INTEGER DEFAULT 0,
+    pages_skipped INTEGER DEFAULT 0,
+    errors INTEGER DEFAULT 0,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS crawl_queue (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    depth INTEGER DEFAULT 0,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES crawl_sessions(id),
+    UNIQUE(session_id, url)
+);
+
+-- ============================================
 -- INDEXES
 -- ============================================
 
@@ -249,6 +276,8 @@ CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
 CREATE INDEX IF NOT EXISTS idx_entities_normalized ON entities(normalized_name);
 CREATE INDEX IF NOT EXISTS idx_doc_terms_term ON doc_terms(term);
 CREATE INDEX IF NOT EXISTS idx_doc_terms_chunk ON doc_terms(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_crawl_queue_session ON crawl_queue(session_id);
+CREATE INDEX IF NOT EXISTS idx_crawl_sessions_url ON crawl_sessions(start_url);
 """
 
 
@@ -1430,3 +1459,379 @@ def export_query_logs_csv(conn: sqlite3.Connection, filepath: str,
         return len(rows)
     except (sqlite3.Error, IOError) as e:
         raise QueryError(f"Failed to export query logs: {e}") from e
+
+
+# =============================================================================
+# Crawl Session Operations
+# =============================================================================
+
+def create_crawl_session(conn: sqlite3.Connection, start_url: str,
+                         allowed_domains: List[str], max_pages: int,
+                         auto_commit: bool = True) -> int:
+    """Create a new crawl session.
+
+    Args:
+        conn: Database connection.
+        start_url: Starting URL for the crawl.
+        allowed_domains: List of allowed domains to crawl.
+        max_pages: Maximum number of pages to crawl.
+        auto_commit: If True, commit after insert.
+
+    Returns:
+        ID of the created session.
+
+    Raises:
+        QueryError: If insert fails.
+    """
+    try:
+        cursor = conn.execute(
+            """INSERT INTO crawl_sessions
+               (start_url, allowed_domains, status, pages_crawled, pages_indexed, pages_skipped, errors)
+               VALUES (?, ?, 'active', 0, 0, 0, 0)""",
+            (start_url, json.dumps(allowed_domains))
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to create crawl session: {e}") from e
+
+
+def get_crawl_session(conn: sqlite3.Connection, session_id: int) -> Optional[Dict[str, Any]]:
+    """Get a crawl session by ID.
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the session to retrieve.
+
+    Returns:
+        Session dict or None if not found.
+    """
+    cursor = conn.execute(
+        "SELECT * FROM crawl_sessions WHERE id = ?",
+        (session_id,)
+    )
+    row = cursor.fetchone()
+    if row:
+        result = dict(row)
+        result['allowed_domains'] = json.loads(result['allowed_domains'])
+        return result
+    return None
+
+
+def get_active_session_for_url(conn: sqlite3.Connection, start_url: str) -> Optional[Dict[str, Any]]:
+    """Find an active or interrupted session for a given URL.
+
+    Used to determine if a crawl can be resumed.
+
+    Args:
+        conn: Database connection.
+        start_url: Starting URL to match.
+
+    Returns:
+        Session dict or None if no resumable session exists.
+    """
+    cursor = conn.execute(
+        """SELECT * FROM crawl_sessions
+           WHERE start_url = ? AND status IN ('active', 'interrupted')
+           ORDER BY started_at DESC LIMIT 1""",
+        (start_url,)
+    )
+    row = cursor.fetchone()
+    if row:
+        result = dict(row)
+        result['allowed_domains'] = json.loads(result['allowed_domains'])
+        return result
+    return None
+
+
+def update_session_status(conn: sqlite3.Connection, session_id: int,
+                          status: str, auto_commit: bool = True) -> None:
+    """Update crawl session status.
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the session to update.
+        status: New status ('active', 'completed', 'interrupted').
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If update fails.
+    """
+    try:
+        completed_at = "CURRENT_TIMESTAMP" if status == 'completed' else "NULL"
+        conn.execute(
+            f"""UPDATE crawl_sessions
+               SET status = ?, completed_at = {completed_at}
+               WHERE id = ?""",
+            (status, session_id)
+        )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update session status: {e}") from e
+
+
+def update_session_stats(conn: sqlite3.Connection, session_id: int,
+                         pages_crawled: int = None, pages_indexed: int = None,
+                         pages_skipped: int = None, errors: int = None,
+                         auto_commit: bool = True) -> None:
+    """Update crawl session statistics.
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the session to update.
+        pages_crawled: Number of pages successfully fetched.
+        pages_indexed: Number of pages indexed.
+        pages_skipped: Number of pages skipped.
+        errors: Number of errors encountered.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If update fails.
+    """
+    try:
+        updates = []
+        params = []
+        if pages_crawled is not None:
+            updates.append("pages_crawled = ?")
+            params.append(pages_crawled)
+        if pages_indexed is not None:
+            updates.append("pages_indexed = ?")
+            params.append(pages_indexed)
+        if pages_skipped is not None:
+            updates.append("pages_skipped = ?")
+            params.append(pages_skipped)
+        if errors is not None:
+            updates.append("errors = ?")
+            params.append(errors)
+
+        if updates:
+            params.append(session_id)
+            conn.execute(
+                f"UPDATE crawl_sessions SET {', '.join(updates)} WHERE id = ?",
+                params
+            )
+            if auto_commit:
+                conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update session stats: {e}") from e
+
+
+def list_crawl_sessions(conn: sqlite3.Connection,
+                        limit: int = 50) -> List[Dict[str, Any]]:
+    """List all crawl sessions.
+
+    Args:
+        conn: Database connection.
+        limit: Maximum number of sessions to return.
+
+    Returns:
+        List of session dicts ordered by started_at descending, then id descending.
+    """
+    cursor = conn.execute(
+        "SELECT * FROM crawl_sessions ORDER BY started_at DESC, id DESC LIMIT ?",
+        (limit,)
+    )
+    sessions = []
+    for row in cursor.fetchall():
+        session = dict(row)
+        session['allowed_domains'] = json.loads(session['allowed_domains'])
+        sessions.append(session)
+    return sessions
+
+
+def acquire_session_lock(conn: sqlite3.Connection, session_id: int,
+                         auto_commit: bool = True) -> bool:
+    """Attempt to acquire a lock on a crawl session.
+
+    Only succeeds if the session is in 'interrupted' status.
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the session to lock.
+        auto_commit: If True, commit after update.
+
+    Returns:
+        True if lock acquired, False if session is already active.
+    """
+    try:
+        cursor = conn.execute(
+            """UPDATE crawl_sessions
+               SET status = 'active'
+               WHERE id = ? AND status = 'interrupted'""",
+            (session_id,)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to acquire session lock: {e}") from e
+
+
+def release_session_lock(conn: sqlite3.Connection, session_id: int,
+                         auto_commit: bool = True) -> None:
+    """Release a lock on a crawl session by marking it interrupted.
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the session to release.
+        auto_commit: If True, commit after update.
+    """
+    update_session_status(conn, session_id, 'interrupted', auto_commit)
+
+
+# =============================================================================
+# Crawl Queue Operations
+# =============================================================================
+
+def add_urls_to_crawl_queue(conn: sqlite3.Connection, session_id: int,
+                            urls: List[str], depth: int = 0,
+                            auto_commit: bool = True) -> int:
+    """Add URLs to the crawl queue.
+
+    Duplicates are silently ignored (uses INSERT OR IGNORE).
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the crawl session.
+        urls: List of URLs to add.
+        depth: Crawl depth for these URLs.
+        auto_commit: If True, commit after insert.
+
+    Returns:
+        Number of URLs actually added (excludes duplicates).
+
+    Raises:
+        QueryError: If insert fails.
+    """
+    if not urls:
+        return 0
+
+    try:
+        added = 0
+        for url in urls:
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO crawl_queue (session_id, url, depth)
+                   VALUES (?, ?, ?)""",
+                (session_id, url, depth)
+            )
+            added += cursor.rowcount
+        if auto_commit:
+            conn.commit()
+        return added
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to add URLs to crawl queue: {e}") from e
+
+
+def pop_from_crawl_queue(conn: sqlite3.Connection, session_id: int,
+                         auto_commit: bool = True) -> Optional[tuple]:
+    """Pop the oldest URL from the crawl queue (FIFO).
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the crawl session.
+        auto_commit: If True, commit after delete.
+
+    Returns:
+        Tuple of (url, depth) or None if queue is empty.
+
+    Raises:
+        QueryError: If operation fails.
+    """
+    try:
+        cursor = conn.execute(
+            """SELECT id, url, depth FROM crawl_queue
+               WHERE session_id = ?
+               ORDER BY added_at ASC, id ASC
+               LIMIT 1""",
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        queue_id, url, depth = row['id'], row['url'], row['depth']
+        conn.execute("DELETE FROM crawl_queue WHERE id = ?", (queue_id,))
+        if auto_commit:
+            conn.commit()
+        return (url, depth)
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to pop from crawl queue: {e}") from e
+
+
+def get_crawl_queue_size(conn: sqlite3.Connection, session_id: int) -> int:
+    """Get the number of URLs in the crawl queue.
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the crawl session.
+
+    Returns:
+        Number of URLs in the queue.
+    """
+    cursor = conn.execute(
+        "SELECT COUNT(*) FROM crawl_queue WHERE session_id = ?",
+        (session_id,)
+    )
+    return cursor.fetchone()[0]
+
+
+def get_crawl_queue_urls(conn: sqlite3.Connection, session_id: int) -> List[str]:
+    """Get all URLs in the crawl queue.
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the crawl session.
+
+    Returns:
+        List of URLs in FIFO order.
+    """
+    cursor = conn.execute(
+        """SELECT url FROM crawl_queue
+           WHERE session_id = ?
+           ORDER BY added_at ASC, id ASC""",
+        (session_id,)
+    )
+    return [row['url'] for row in cursor.fetchall()]
+
+
+def clear_crawl_queue(conn: sqlite3.Connection, session_id: int,
+                      auto_commit: bool = True) -> int:
+    """Remove all URLs from the crawl queue.
+
+    Args:
+        conn: Database connection.
+        session_id: ID of the crawl session.
+        auto_commit: If True, commit after delete.
+
+    Returns:
+        Number of URLs removed.
+
+    Raises:
+        QueryError: If delete fails.
+    """
+    try:
+        cursor = conn.execute(
+            "DELETE FROM crawl_queue WHERE session_id = ?",
+            (session_id,)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.rowcount
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to clear crawl queue: {e}") from e

@@ -239,5 +239,112 @@ class TestIngestOutput(unittest.TestCase):
             self.assertNotIn('Ingested 0 pages', output)  # Bug 2 check - old buggy format
 
 
+class TestCrawlSessionCLI(unittest.TestCase):
+    """Test crawl session CLI commands."""
+
+    def setUp(self):
+        """Set up test database."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Clean up test database."""
+        os.unlink(self.temp_path)
+
+    def test_ingest_fresh_flag_parsed(self):
+        """Parser should recognize --fresh flag."""
+        from rag_system.main import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(['ingest', 'https://example.com', '--fresh'])
+
+        self.assertTrue(args.fresh)
+
+    def test_ingest_fresh_flag_default_false(self):
+        """Parser should default --fresh to False."""
+        from rag_system.main import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(['ingest', 'https://example.com'])
+
+        self.assertFalse(args.fresh)
+
+    def test_ingest_passes_fresh_to_indexer(self):
+        """ingest command should pass fresh flag to indexer."""
+        from rag_system.main import RAGSystem
+        from rag_system.ingestion.indexer import Indexer
+
+        rag = RAGSystem(db_path=self.temp_path)
+
+        with patch.object(Indexer, 'crawl_and_index') as mock_crawl:
+            mock_crawl.return_value = {
+                'pages_crawled': 1,
+                'pages_indexed': 1,
+                'pages_skipped': 0,
+                'errors': 0
+            }
+
+            rag.ingest('https://example.com', max_pages=10, fresh=True)
+
+            mock_crawl.assert_called_once()
+            call_kwargs = mock_crawl.call_args[1]
+            self.assertTrue(call_kwargs.get('fresh', False))
+
+    def test_crawl_sessions_command_exists(self):
+        """Parser should have crawl-sessions command."""
+        from rag_system.main import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(['crawl-sessions'])
+
+        self.assertEqual(args.command, 'crawl-sessions')
+
+    def test_crawl_sessions_list(self):
+        """crawl-sessions should list sessions."""
+        from rag_system.main import main
+        from rag_system.database import get_connection, create_crawl_session
+        from io import StringIO
+
+        # Create a session
+        conn = get_connection(self.temp_path)
+        create_crawl_session(conn, 'https://example.com', ['example.com'], 100)
+        conn.close()
+
+        test_args = ['rag_system', '--db', self.temp_path, 'crawl-sessions']
+
+        with patch('sys.argv', test_args), \
+             patch('sys.stdout', new=StringIO()) as fake_out:
+            main()
+            output = fake_out.getvalue()
+
+            self.assertIn('https://example.com', output)
+
+    def test_crawl_sessions_json_output(self):
+        """crawl-sessions --json should output JSON."""
+        from rag_system.main import main
+        from rag_system.database import get_connection, create_crawl_session
+        from io import StringIO
+        import json
+
+        conn = get_connection(self.temp_path)
+        create_crawl_session(conn, 'https://example.com', ['example.com'], 100)
+        conn.close()
+
+        test_args = ['rag_system', '--db', self.temp_path, 'crawl-sessions', '--json']
+
+        with patch('sys.argv', test_args), \
+             patch('sys.stdout', new=StringIO()) as fake_out:
+            main()
+            output = fake_out.getvalue()
+
+            # Should be valid JSON
+            data = json.loads(output)
+            self.assertIsInstance(data, list)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]['start_url'], 'https://example.com')
+
+
 if __name__ == '__main__':
     unittest.main()
