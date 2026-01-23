@@ -132,6 +132,10 @@ def create_parser() -> argparse.ArgumentParser:
         '--ignore-robots', action='store_true',
         help='Ignore robots.txt restrictions (use responsibly)'
     )
+    ingest_parser.add_argument(
+        '--fresh', action='store_true',
+        help='Start a new crawl even if a resumable session exists'
+    )
 
     # Query command
     query_parser = subparsers.add_parser('query', help='Query the system')
@@ -184,6 +188,16 @@ def create_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument(
         '--batch-size', type=int, default=config.EMBEDDING_BATCH_SIZE,
         help='Number of chunks to embed per API call'
+    )
+
+    # Crawl sessions command
+    sessions_parser = subparsers.add_parser(
+        'crawl-sessions',
+        help='View and manage crawl sessions'
+    )
+    sessions_parser.add_argument(
+        '--json', action='store_true',
+        help='Output as JSON'
     )
 
     return parser
@@ -490,13 +504,18 @@ class RAGSystem:
         return result
 
     def ingest(self, start_url: str, max_pages: int = None,
-                ignore_robots: bool = False) -> Dict[str, Any]:
+                ignore_robots: bool = False, fresh: bool = False) -> Dict[str, Any]:
         """Ingest documentation from URL.
+
+        Supports resuming interrupted crawls. If a previous crawl for the same
+        URL was interrupted, it will automatically resume from where it left off
+        unless fresh=True is specified.
 
         Args:
             start_url: Starting URL to crawl.
             max_pages: Maximum pages to crawl.
             ignore_robots: If True, ignore robots.txt restrictions.
+            fresh: If True, start a new crawl even if a resumable session exists.
 
         Returns:
             Ingestion statistics.
@@ -523,7 +542,8 @@ class RAGSystem:
             included_paths=config.INCLUDED_PATHS,
             max_pages=max_pages,
             delay=config.CRAWL_DELAY_SECONDS,
-            ignore_robots=ignore_robots
+            ignore_robots=ignore_robots,
+            fresh=fresh
         )
 
     def get_stats(self) -> Dict[str, int]:
@@ -748,15 +768,19 @@ def main() -> None:
                 print(f"Ingesting from {args.url} (unlimited pages)...")
             else:
                 print(f"Ingesting from {args.url} (max {max_pages} pages)...")
+            if args.fresh:
+                print("Starting fresh crawl (ignoring any existing session)...")
             try:
                 stats = rag.ingest(
                     args.url,
                     max_pages=max_pages,
-                    ignore_robots=args.ignore_robots
+                    ignore_robots=args.ignore_robots,
+                    fresh=args.fresh
                 )
-                print(f"Crawled {stats['pages_crawled']} pages, indexed {stats['pages_indexed']}, skipped {stats['pages_skipped']}, errors: {stats['errors']}")
+                resumed_msg = " (resumed)" if stats.get('resumed') else ""
+                print(f"Crawled {stats['pages_crawled']} pages{resumed_msg}, indexed {stats['pages_indexed']}, skipped {stats['pages_skipped']}, errors: {stats['errors']}")
             except KeyboardInterrupt:
-                print("\nIngestion interrupted. Partial data may have been indexed.")
+                print("\nIngestion interrupted. Progress has been saved - run the same command to resume.")
                 logger.info("Ingestion interrupted by user")
 
         elif args.command == 'query':
@@ -862,6 +886,26 @@ def main() -> None:
                 rag.vector_client,
                 batch_size=args.batch_size
             )
+
+        elif args.command == 'crawl-sessions':
+            from rag_system.database import get_connection, list_crawl_sessions
+            conn = get_connection(args.db)
+            try:
+                sessions = list_crawl_sessions(conn)
+                if args.json:
+                    import json
+                    print(json.dumps(sessions, indent=2, default=str))
+                else:
+                    if not sessions:
+                        print("No crawl sessions found.")
+                    else:
+                        print(f"{'ID':<6} {'Status':<12} {'URL':<50} {'Pages':<8} {'Started'}")
+                        print("-" * 100)
+                        for s in sessions:
+                            started = s['started_at'][:19] if s['started_at'] else 'N/A'
+                            print(f"{s['id']:<6} {s['status']:<12} {s['start_url'][:50]:<50} {s['pages_crawled']:<8} {started}")
+            finally:
+                conn.close()
 
     except KeyboardInterrupt:
         print("\nShutdown requested")

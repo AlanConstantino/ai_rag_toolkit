@@ -13,7 +13,10 @@ from rag_system.api_client import APIError
 from rag_system.database import (
     get_connection, insert_page, get_page_by_url,
     insert_chunk, update_chunk_embedding,
-    delete_chunks_by_page, delete_doc_terms_by_page, update_page_content
+    delete_chunks_by_page, delete_doc_terms_by_page, update_page_content,
+    create_crawl_session, get_active_session_for_url, get_crawl_session,
+    update_session_status, update_session_stats, acquire_session_lock,
+    add_urls_to_crawl_queue, get_crawl_queue_urls, clear_crawl_queue
 )
 from rag_system.ingestion.crawler import Crawler
 from rag_system.ingestion.parser import parse_html, extract_title
@@ -299,8 +302,13 @@ class Indexer:
                         included_paths: Optional[List[str]] = None,
                         max_pages: int = 1000,
                         delay: float = 1.0,
-                        ignore_robots: bool = False) -> Dict[str, int]:
+                        ignore_robots: bool = False,
+                        fresh: bool = False) -> Dict[str, int]:
         """Crawl a website and index all pages.
+
+        Supports resuming interrupted crawls. If a previous crawl for the same
+        URL was interrupted, it will automatically resume from where it left off
+        unless fresh=True is specified.
 
         Args:
             start_url: Starting URL.
@@ -311,51 +319,128 @@ class Indexer:
             max_pages: Maximum pages to crawl.
             delay: Delay between requests.
             ignore_robots: If True, ignore robots.txt restrictions.
+            fresh: If True, start a new crawl even if a resumable session exists.
 
         Returns:
             Dict with crawl/index statistics.
         """
-        crawler = Crawler(
-            start_url=start_url,
-            allowed_domains=allowed_domains,
-            excluded_paths=excluded_paths or config.EXCLUDED_PATHS,
-            included_paths=included_paths or config.INCLUDED_PATHS,
-            max_pages=max_pages,
-            delay=delay,
-            cache_dir=os.environ.get('RAG_HTTP_CACHE_DIR'),
-            ignore_robots=ignore_robots
-        )
+        conn = get_connection(self.db_path)
+        session_id = None
+        resuming = False
 
-        pages_crawled = 0
-        pages_indexed = 0
-        pages_skipped = 0
-        errors = 0
+        try:
+            # Check for existing resumable session
+            if not fresh:
+                existing_session = get_active_session_for_url(conn, start_url)
+                if existing_session and existing_session['status'] == 'interrupted':
+                    # Try to acquire lock on the session
+                    if acquire_session_lock(conn, existing_session['id']):
+                        session_id = existing_session['id']
+                        resuming = True
+                        logger.info(f"Resuming interrupted session {session_id}")
 
-        for page_data in crawler.crawl():
-            pages_crawled += 1
+            # Create new session if not resuming
+            if session_id is None:
+                session_id = create_crawl_session(
+                    conn, start_url, allowed_domains, max_pages
+                )
+                logger.info(f"Created new crawl session {session_id}")
+
+            # Create crawler
+            crawler = Crawler(
+                start_url=start_url,
+                allowed_domains=allowed_domains,
+                excluded_paths=excluded_paths or config.EXCLUDED_PATHS,
+                included_paths=included_paths or config.INCLUDED_PATHS,
+                max_pages=max_pages,
+                delay=delay,
+                cache_dir=os.environ.get('RAG_HTTP_CACHE_DIR'),
+                ignore_robots=ignore_robots
+            )
+
+            # If resuming, load queue from database
+            if resuming:
+                queue_urls = get_crawl_queue_urls(conn, session_id)
+                if queue_urls:
+                    crawler.queue = list(queue_urls)
+                    logger.info(f"Loaded {len(queue_urls)} URLs from saved queue")
+                # Clear the queue in DB since we've loaded it into memory
+                clear_crawl_queue(conn, session_id)
+
+            pages_crawled = 0
+            pages_indexed = 0
+            pages_skipped = 0
+            errors = 0
+
             try:
-                page_id = self.index_page(page_data)
-                if page_id:
-                    pages_indexed += 1
-                else:
-                    pages_skipped += 1
-            except Exception as e:
-                logger.error(f"Error indexing {page_data.get('url')}: {e}")
-                errors += 1
+                for page_data in crawler.crawl():
+                    pages_crawled += 1
+                    try:
+                        page_id = self.index_page(page_data)
+                        if page_id:
+                            pages_indexed += 1
+                        else:
+                            pages_skipped += 1
+                    except Exception as e:
+                        logger.error(f"Error indexing {page_data.get('url')}: {e}")
+                        errors += 1
 
-        # Build BM25 index for search
-        from rag_system.search.bm25_search import BM25Index
-        logger.info("Building BM25 search index...")
-        bm25_index = BM25Index(self.db_path)
-        bm25_index.build()
-        logger.info("BM25 index built successfully")
+                    # Update session stats periodically
+                    if pages_crawled % 10 == 0:
+                        update_session_stats(
+                            conn, session_id,
+                            pages_crawled=pages_crawled,
+                            pages_indexed=pages_indexed,
+                            pages_skipped=pages_skipped,
+                            errors=errors
+                        )
 
-        return {
-            'pages_crawled': pages_crawled,
-            'pages_indexed': pages_indexed,
-            'pages_skipped': pages_skipped,
-            'errors': errors
-        }
+                # Crawl completed successfully
+                update_session_stats(
+                    conn, session_id,
+                    pages_crawled=pages_crawled,
+                    pages_indexed=pages_indexed,
+                    pages_skipped=pages_skipped,
+                    errors=errors
+                )
+                update_session_status(conn, session_id, 'completed')
+                logger.info(f"Crawl session {session_id} completed")
+
+            except KeyboardInterrupt:
+                # Save queue state for resume
+                logger.info("Crawl interrupted, saving state...")
+                if crawler.queue:
+                    add_urls_to_crawl_queue(conn, session_id, crawler.queue)
+                    logger.info(f"Saved {len(crawler.queue)} URLs to queue")
+                update_session_stats(
+                    conn, session_id,
+                    pages_crawled=pages_crawled,
+                    pages_indexed=pages_indexed,
+                    pages_skipped=pages_skipped,
+                    errors=errors
+                )
+                update_session_status(conn, session_id, 'interrupted')
+                logger.info(f"Crawl session {session_id} interrupted")
+                raise  # Re-raise to let caller handle
+
+            # Build BM25 index for search
+            from rag_system.search.bm25_search import BM25Index
+            logger.info("Building BM25 search index...")
+            bm25_index = BM25Index(self.db_path)
+            bm25_index.build()
+            logger.info("BM25 index built successfully")
+
+            return {
+                'pages_crawled': pages_crawled,
+                'pages_indexed': pages_indexed,
+                'pages_skipped': pages_skipped,
+                'errors': errors,
+                'session_id': session_id,
+                'resumed': resuming
+            }
+
+        finally:
+            conn.close()
 
     def get_stats(self) -> Dict[str, int]:
         """Get index statistics.
