@@ -484,6 +484,36 @@ class TestURLValidation(unittest.TestCase):
 
         self.assertEqual(ctx.exception.url, 'file:///etc/passwd')
 
+    def test_validate_url_rejects_spaces(self):
+        """validate_url should reject URLs containing spaces."""
+        from rag_system.ingestion.crawler import validate_url
+
+        # URL with space (like the malformed Python docs link)
+        is_valid, error = validate_url('https://example.com/path/ https:/other.com/path')
+
+        self.assertFalse(is_valid)
+        self.assertIn('space', error.lower())
+
+    def test_validate_url_rejects_control_characters(self):
+        """validate_url should reject URLs containing control characters."""
+        from rag_system.ingestion.crawler import validate_url
+
+        # URL with tab character
+        is_valid, error = validate_url('https://example.com/path\twith\ttabs')
+
+        self.assertFalse(is_valid)
+        self.assertIn('control character', error.lower())
+
+    def test_validate_url_rejects_newline(self):
+        """validate_url should reject URLs containing newlines."""
+        from rag_system.ingestion.crawler import validate_url
+
+        # URL with newline
+        is_valid, error = validate_url('https://example.com/path\nwith\nnewlines')
+
+        self.assertFalse(is_valid)
+        self.assertIn('control character', error.lower())
+
 
 class TestCrawlStats(unittest.TestCase):
     """Test CrawlStats class."""

@@ -199,6 +199,7 @@ def validate_url(url: str, allow_private: bool = False) -> Tuple[bool, Optional[
     """Validate a URL for safe crawling.
 
     Checks for:
+    - No spaces or control characters
     - Valid URL scheme (http/https only)
     - Non-private IP addresses (unless allow_private is True)
     - Non-blocked hostnames
@@ -210,6 +211,14 @@ def validate_url(url: str, allow_private: bool = False) -> Tuple[bool, Optional[
     Returns:
         Tuple of (is_valid, error_message).
     """
+    # Check for spaces and control characters (ASCII 0-31)
+    # These cause urllib to raise InvalidURL
+    for char in url:
+        if char == ' ':
+            return False, "URL contains space"
+        if ord(char) < 32:
+            return False, f"URL contains control character (ord={ord(char)})"
+
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception as e:
