@@ -799,8 +799,30 @@ def main() -> None:
                 logger.info("Ingestion interrupted by user")
 
         elif args.command == 'query':
-            result = rag.query(args.question, top_k=args.top_k)
-            print(format_query_result(result))
+            # When AI is disabled, fall back to BM25 search
+            if not config.AI_ENABLED:
+                print("AI features disabled. Showing BM25 search results:\n")
+                results = rag.bm25_search.search(args.question, top_k=args.top_k)
+                if not results:
+                    print("No results found.")
+                else:
+                    print(f"Search Results ({len(results)} matches)")
+                    print("=" * 60)
+                    conn = get_connection(args.db)
+                    try:
+                        from rag_system.database import get_chunk_by_id
+                        for i, (chunk_id, score) in enumerate(results, 1):
+                            chunk = get_chunk_by_id(conn, chunk_id)
+                            if chunk:
+                                heading = chunk['heading_path'] or 'No heading'
+                                content = chunk['content'][:200] + '...' if len(chunk['content']) > 200 else chunk['content']
+                                print(f"\n{i}. [{heading}] (score: {score:.4f})")
+                                print(f"   {content}")
+                    finally:
+                        conn.close()
+            else:
+                result = rag.query(args.question, top_k=args.top_k)
+                print(format_query_result(result))
 
         elif args.command == 'bm25':
             # Pure BM25 search - no AI, no query expansion, just lexical matching
