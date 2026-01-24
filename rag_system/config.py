@@ -13,6 +13,13 @@ class ConfigurationError(Exception):
     pass
 
 # =============================================================================
+# AI Feature Toggle
+# =============================================================================
+
+# When disabled, the system uses BM25 search only (no embeddings or LLM calls)
+AI_ENABLED: bool = os.environ.get('RAG_AI_ENABLED', 'true').lower() in ('true', '1', 'yes')
+
+# =============================================================================
 # API Configuration
 # =============================================================================
 
@@ -300,12 +307,14 @@ def validate_config(require_apis: bool = False) -> Tuple[bool, List[str]]:
             f"RAG_BM25_WEIGHT must be between 0 and 1, got {BM25_WEIGHT}"
         )
 
-    weight_sum = VECTOR_WEIGHT + BM25_WEIGHT
-    if abs(weight_sum - 1.0) > 0.001:
-        errors.append(
-            f"RAG_VECTOR_WEIGHT + RAG_BM25_WEIGHT must equal 1.0, "
-            f"got {VECTOR_WEIGHT} + {BM25_WEIGHT} = {weight_sum}"
-        )
+    # Only validate weight sum when AI is enabled (hybrid search requires it)
+    if AI_ENABLED:
+        weight_sum = VECTOR_WEIGHT + BM25_WEIGHT
+        if abs(weight_sum - 1.0) > 0.001:
+            errors.append(
+                f"RAG_VECTOR_WEIGHT + RAG_BM25_WEIGHT must equal 1.0, "
+                f"got {VECTOR_WEIGHT} + {BM25_WEIGHT} = {weight_sum}"
+            )
 
     # Validate retrieval settings
     if TOP_K_RETRIEVAL <= 0:

@@ -105,8 +105,9 @@ class TestConfigValidation(unittest.TestCase):
             self.assertTrue(any('CHUNK_OVERLAP' in e for e in errors))
 
     def test_weight_sum_validation(self):
-        """Vector weight + BM25 weight must equal 1.0."""
+        """Vector weight + BM25 weight must equal 1.0 when AI is enabled."""
         with mock.patch.dict(os.environ, {
+            'RAG_AI_ENABLED': 'true',
             'RAG_VECTOR_WEIGHT': '0.8',
             'RAG_BM25_WEIGHT': '0.3',
         }):
@@ -117,6 +118,42 @@ class TestConfigValidation(unittest.TestCase):
             is_valid, errors = config.validate_config()
             self.assertFalse(is_valid)
             self.assertTrue(any('equal 1.0' in e for e in errors))
+
+    def test_weight_sum_validation_skipped_when_ai_disabled(self):
+        """Weight sum validation should be skipped when AI is disabled."""
+        with mock.patch.dict(os.environ, {
+            'RAG_AI_ENABLED': 'false',
+            'RAG_VECTOR_WEIGHT': '0.8',
+            'RAG_BM25_WEIGHT': '0.3',
+        }):
+            import importlib
+            from rag_system import config
+            importlib.reload(config)
+
+            is_valid, errors = config.validate_config()
+            # Should not have weight sum error when AI is disabled
+            weight_errors = [e for e in errors if 'equal 1.0' in e]
+            self.assertEqual(weight_errors, [])
+
+    def test_ai_enabled_flag_default(self):
+        """AI_ENABLED should default to True."""
+        # Clear any RAG_AI_ENABLED env var
+        env = {k: v for k, v in os.environ.items() if k != 'RAG_AI_ENABLED'}
+        with mock.patch.dict(os.environ, env, clear=True):
+            import importlib
+            from rag_system import config
+            importlib.reload(config)
+
+            self.assertTrue(config.AI_ENABLED)
+
+    def test_ai_enabled_flag_false(self):
+        """AI_ENABLED should be False when set to false."""
+        with mock.patch.dict(os.environ, {'RAG_AI_ENABLED': 'false'}):
+            import importlib
+            from rag_system import config
+            importlib.reload(config)
+
+            self.assertFalse(config.AI_ENABLED)
 
     def test_bm25_b_range(self):
         """BM25 B parameter must be between 0 and 1."""
