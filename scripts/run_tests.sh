@@ -27,24 +27,22 @@ set -e
 # Change to project root directory
 cd "$(dirname "$0")/.."
 
-# Default to discover all tests
-TEST_TARGET="${1:-discover -s tests -p 'test_*.py'}"
-
-# Check if verbose flag is passed
-if [[ "$1" == "-v" ]]; then
-    TEST_TARGET="discover -s tests -p 'test_*.py' -v"
-elif [[ -n "$1" && "$1" != "-v" ]]; then
-    # Specific test file provided
-    TEST_TARGET="$1"
-    shift
-fi
-
 echo "========================================"
 echo "  Running RAG System Tests"
 echo "========================================"
 echo ""
 
-python -m unittest $TEST_TARGET "$@"
+# Handle arguments
+if [[ -z "$1" ]]; then
+    # No arguments - run all tests
+    python -m unittest discover -s tests -p "test_*.py"
+elif [[ "$1" == "-v" ]]; then
+    # Verbose flag - run all tests with verbose
+    python -m unittest discover -s tests -p "test_*.py" -v
+else
+    # Specific test file or pattern provided
+    python -m unittest "$@"
+fi
 
 echo ""
 echo "========================================"
