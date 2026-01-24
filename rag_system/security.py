@@ -10,8 +10,8 @@ from typing import Optional, Tuple
 # Maximum query length in characters
 MAX_QUERY_LENGTH = 10000
 
-# Maximum content length for database storage (1MB in characters)
-MAX_CONTENT_LENGTH = 1000000
+# Maximum content length for database storage (50MB in characters)
+MAX_CONTENT_LENGTH = 50000000
 
 # Patterns that might indicate malicious content
 SUSPICIOUS_PATTERNS = [
