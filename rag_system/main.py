@@ -888,7 +888,7 @@ def main() -> None:
             )
 
         elif args.command == 'crawl-sessions':
-            from rag_system.database import get_connection, list_crawl_sessions
+            from rag_system.database import list_crawl_sessions
             conn = get_connection(args.db)
             try:
                 sessions = list_crawl_sessions(conn)
