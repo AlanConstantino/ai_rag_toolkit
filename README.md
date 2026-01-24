@@ -25,6 +25,8 @@ echo 'OPENAI_API_KEY=sk-your-key-here' > .env
 ### What It Does Well
 
 - **Hybrid Search**: Combines BM25 (keyword matching) with vector similarity (semantic search) for best-of-both-worlds retrieval
+- **BM25-Only Mode**: Works without AI/API keys using pure lexical search (`RAG_AI_ENABLED=false`)
+- **Crawl Resume**: Interrupt a crawl with Ctrl+C and resume later—progress is saved automatically
 - **No Dependencies**: Pure Python 3.6+ standard library—runs anywhere without pip install
 - **Incremental Updates**: Re-crawling detects changed pages via content hashing and only re-indexes what changed
 - **Production Ready**: Circuit breakers, rate limiting, graceful shutdown, health checks, structured logging
@@ -35,7 +37,6 @@ echo 'OPENAI_API_KEY=sk-your-key-here' > .env
 
 ### Current Limitations
 
-- **No Crawl Resume**: If you interrupt a crawl, it starts over (see [Issue #50](https://github.com/AlanConstantino/ai_rag_toolkit/issues/50))
 - **Hallucination Risk**: LLM may not always use retrieved context faithfully (see [Issue #49](https://github.com/AlanConstantino/ai_rag_toolkit/issues/49))
 - **Entity Extraction Not Wired**: Knowledge graph extraction code exists but isn't called during ingestion (see [Issue #25](https://github.com/AlanConstantino/ai_rag_toolkit/issues/25))
 - **Summarization Not Wired**: Page/system/global summarization exists but isn't called (see [Issues #26-27](https://github.com/AlanConstantino/ai_rag_toolkit/issues/26))
@@ -82,6 +83,7 @@ export RAG_CHAT_API_AUTH_VALUE="Bearer your-token"
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `RAG_AI_ENABLED` | `true` | Enable AI features (set `false` for BM25-only mode) |
 | `RAG_DATABASE_PATH` | `rag_system.db` | SQLite database location |
 | `RAG_MAX_PAGES` | `1000` | Default max pages to crawl |
 | `RAG_CRAWL_DELAY_SECONDS` | `1.0` | Delay between requests |
@@ -91,6 +93,8 @@ export RAG_CHAT_API_AUTH_VALUE="Bearer your-token"
 | `RAG_LARGE_CHUNK_SIZE` | `2000` | Large chunk size (chars) |
 | `RAG_QUERY_CACHE_ENABLED` | `true` | Enable query result caching |
 | `RAG_QUERY_CACHE_TTL` | `3600` | Cache TTL in seconds |
+
+See `.env.example` for a complete list of all configuration options.
 
 ## Usage
 
@@ -106,8 +110,11 @@ Convenience scripts are in `scripts/`:
 ./scripts/crawl.sh https://docs.python.org/3/ --max-pages 100
 ./scripts/crawl.sh https://example.com --unlimited --ignore-robots
 
-# Query
+# Query (uses AI if available)
 ./scripts/query.sh "How do I configure timeouts?"
+
+# BM25 search (no AI required)
+./scripts/bm25.sh "configuration timeout"
 
 # Interactive mode
 ./scripts/interactive.sh
@@ -146,8 +153,17 @@ python -m rag_system.main health
 # Query analytics
 python -m rag_system.main analytics
 
+# BM25 search (no AI required)
+python -m rag_system.main bm25 "search terms"
+
 # Backfill embeddings (if crawled without API key)
 python -m rag_system.main backfill
+
+# Rebuild BM25 index
+python -m rag_system.main rebuild-index
+
+# View crawl sessions
+python -m rag_system.main crawl-sessions
 ```
 
 ### CLI Options
@@ -160,6 +176,16 @@ Options:
   --max-pages N      Maximum pages to crawl (default: 1000)
   --unlimited        Crawl all pages with no limit
   --ignore-robots    Ignore robots.txt restrictions
+  --fresh            Start fresh crawl (ignore any saved session)
+```
+
+**BM25 command:**
+```bash
+python -m rag_system.main bm25 "search terms" [options]
+
+Options:
+  --top-k N          Number of results (default: 5)
+  --json             Output as JSON
 ```
 
 **Query command:**
@@ -228,7 +254,7 @@ The system uses SQLite with these key tables:
 ## Testing
 
 ```bash
-# Run all tests (612 tests)
+# Run all tests (655 tests)
 ./scripts/run_tests.sh
 
 # Run with verbose output
@@ -275,8 +301,9 @@ ai_rag_toolkit/
 │   ├── knowledge_graph/     # Entity extraction (not wired)
 │   └── summarization/       # Summarization (not wired)
 ├── scripts/                 # Convenience bash scripts
-├── tests/                   # Test suite (612 tests)
-└── .env                     # API keys (create this)
+├── tests/                   # Test suite (655 tests)
+├── .env                     # Your config (create from .env.example)
+└── .env.example             # Configuration template
 ```
 
 ## Known Issues & Pitfalls
@@ -307,7 +334,6 @@ Vector search loads all embeddings into memory. For very large indexes (100k+ ch
 
 See [open issues](https://github.com/AlanConstantino/ai_rag_toolkit/issues) for planned improvements:
 
-- **[#50](https://github.com/AlanConstantino/ai_rag_toolkit/issues/50)**: Crawler resume capability for interrupted crawls
 - **[#49](https://github.com/AlanConstantino/ai_rag_toolkit/issues/49)**: Grounding safeguards to prevent hallucination
 - **[#25-28](https://github.com/AlanConstantino/ai_rag_toolkit/issues/25)**: Wire up entity extraction, summarization, and knowledge graph
 - **[#30-33](https://github.com/AlanConstantino/ai_rag_toolkit/issues/30)**: Code organization and documentation improvements
