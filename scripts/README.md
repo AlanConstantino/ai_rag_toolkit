@@ -24,7 +24,8 @@ Convenience scripts for interacting with the RAG (Retrieval-Augmented Generation
 |--------|---------|
 | `setup.sh` | First-time setup wizard (creates .env, initializes DB) |
 | `crawl.sh` | Crawl and index a documentation website |
-| `query.sh` | Ask a single question |
+| `query.sh` | Ask a single question (uses AI if available) |
+| `bm25.sh` | BM25 lexical search (no AI required) |
 | `interactive.sh` | Start an interactive Q&A session |
 | `backfill.sh` | Generate embeddings for chunks missing them |
 | `stats.sh` | Show database statistics |
@@ -54,6 +55,20 @@ Run this first! Checks your Python version, helps create a `.env` file with your
 ```bash
 ./scripts/query.sh "your question here"
 ./scripts/query.sh "How does authentication work?" --top-k 10
+```
+
+### bm25.sh
+Pure BM25 lexical search - no AI, no API keys required. Fast and works offline.
+
+```bash
+./scripts/bm25.sh "search terms"
+./scripts/bm25.sh "configuration timeout" --top-k 10
+./scripts/bm25.sh "authentication" --json
+```
+
+If you get no results, you may need to rebuild the index:
+```bash
+python -m rag_system.main rebuild-index
 ```
 
 ### backfill.sh

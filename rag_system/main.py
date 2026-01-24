@@ -145,6 +145,21 @@ def create_parser() -> argparse.ArgumentParser:
         help='Number of results to return'
     )
 
+    # BM25 search command (no AI required)
+    bm25_parser = subparsers.add_parser('bm25', help='BM25 lexical search (no AI)')
+    bm25_parser.add_argument('query', help='Search query')
+    bm25_parser.add_argument(
+        '--top-k', type=int, default=config.TOP_K_FINAL,
+        help='Number of results to return'
+    )
+    bm25_parser.add_argument(
+        '--json', action='store_true',
+        help='Output results as JSON'
+    )
+
+    # Rebuild BM25 index command
+    subparsers.add_parser('rebuild-index', help='Rebuild the BM25 search index')
+
     # Stats command
     subparsers.add_parser('stats', help='Show system statistics')
 
@@ -787,6 +802,50 @@ def main() -> None:
             result = rag.query(args.question, top_k=args.top_k)
             print(format_query_result(result))
 
+        elif args.command == 'bm25':
+            # Pure BM25 search - no AI, no query expansion, just lexical matching
+            results = rag.bm25_search.search(args.query, top_k=args.top_k)
+
+            if args.json:
+                import json as json_module
+                # Fetch chunk details for JSON output
+                conn = get_connection(args.db)
+                try:
+                    from rag_system.database import get_chunk_by_id
+                    output = []
+                    for chunk_id, score in results:
+                        chunk = get_chunk_by_id(conn, chunk_id)
+                        if chunk:
+                            output.append({
+                                'chunk_id': chunk_id,
+                                'score': round(score, 4),
+                                'content': chunk['content'],
+                                'heading_path': chunk['heading_path'],
+                                'url': chunk.get('url', '')
+                            })
+                    print(json_module.dumps(output, indent=2))
+                finally:
+                    conn.close()
+            else:
+                # Human-readable output
+                if not results:
+                    print("No results found.")
+                else:
+                    print(f"BM25 Search Results ({len(results)} matches)")
+                    print("=" * 60)
+                    conn = get_connection(args.db)
+                    try:
+                        from rag_system.database import get_chunk_by_id
+                        for i, (chunk_id, score) in enumerate(results, 1):
+                            chunk = get_chunk_by_id(conn, chunk_id)
+                            if chunk:
+                                heading = chunk['heading_path'] or 'No heading'
+                                content = chunk['content'][:200] + '...' if len(chunk['content']) > 200 else chunk['content']
+                                print(f"\n{i}. [{heading}] (score: {score:.4f})")
+                                print(f"   {content}")
+                    finally:
+                        conn.close()
+
         elif args.command == 'stats':
             stats = rag.get_stats()
             print(format_stats(stats))
@@ -873,6 +932,23 @@ def main() -> None:
                     print("Cache cleared successfully")
                 else:
                     print("Query caching is disabled")
+
+        elif args.command == 'rebuild-index':
+            from rag_system.search.bm25_search import BM25Index
+            print("Rebuilding BM25 search index...")
+            bm25_index = BM25Index(args.db)
+            bm25_index.build()
+            # Verify it worked
+            conn = get_connection(args.db)
+            try:
+                from rag_system.database import get_corpus_stats
+                stats = get_corpus_stats(conn)
+                if stats:
+                    print(f"Index rebuilt: {stats['total_docs']} documents indexed")
+                else:
+                    print("Warning: Index may not have built correctly")
+            finally:
+                conn.close()
 
         elif args.command == 'backfill':
             if not rag.vector_client:
