@@ -272,12 +272,15 @@ class RAGSystem:
         self.db_path = db_path or config.DATABASE_PATH
 
         # Auto-create OpenAI clients if API key is available and no clients provided
-        if vector_client is None and chat_client is None:
+        # Only create AI clients if AI is enabled
+        if config.AI_ENABLED and vector_client is None and chat_client is None:
             api_key = os.environ.get('OPENAI_API_KEY')
             if api_key:
                 logger.info("Using OpenAI API for embeddings and chat")
                 vector_client = create_openai_vector_client()
                 chat_client = create_openai_chat_client()
+        elif not config.AI_ENABLED:
+            logger.info("AI features disabled (RAG_AI_ENABLED=false), using BM25 search only")
 
         self.vector_client = vector_client
         self.chat_client = chat_client
@@ -375,26 +378,23 @@ class RAGSystem:
         search_start = time.time()
 
         for q in expanded:
-            if self.vector_client:
-                # Get embedding and do hybrid search
+            # BM25 is always the foundation
+            # Vector search enhances when AI is enabled and vector_client available
+            query_embedding = None
+
+            if config.AI_ENABLED and self.vector_client:
                 try:
                     embed_start = time.time()
                     query_embedding = self.vector_client.get_embedding(q)
                     timing_metrics['embedding_time'] = timing_metrics.get('embedding_time', 0) + (time.time() - embed_start)
-
-                    search_op_start = time.time()
-                    results = self.hybrid_search.search(query_embedding, q)
-                    timing_metrics['search_time'] = timing_metrics.get('search_time', 0) + (time.time() - search_op_start)
                 except Exception as e:
-                    logger.warning(f"Vector search failed, falling back to BM25: {e}")
-                    search_op_start = time.time()
-                    results = self.bm25_search.search(q)
-                    timing_metrics['search_time'] = timing_metrics.get('search_time', 0) + (time.time() - search_op_start)
-            else:
-                # BM25 only
-                search_op_start = time.time()
-                results = self.bm25_search.search(q)
-                timing_metrics['search_time'] = timing_metrics.get('search_time', 0) + (time.time() - search_op_start)
+                    logger.warning(f"Vector embedding failed, using BM25 only: {e}")
+
+            # Hybrid search handles None embedding gracefully (returns BM25 only)
+            search_op_start = time.time()
+            results = self.hybrid_search.search(query_embedding, q)
+            timing_metrics['search_time'] = timing_metrics.get('search_time', 0) + (time.time() - search_op_start)
+
             all_results.extend(results)
 
         # Deduplicate by chunk_id

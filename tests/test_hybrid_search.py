@@ -144,6 +144,56 @@ class TestHybridSearch(unittest.TestCase):
         # Both normalized to 1.0, so result = 0.6 * 1.0 + 0.4 * 1.0 = 1.0
         self.assertAlmostEqual(results[0][1], 1.0, places=5)
 
+    def test_hybrid_search_bm25_only_when_no_embedding(self):
+        """HybridSearch should return BM25 results when embedding is None."""
+        from rag_system.search.hybrid_search import HybridSearch
+        from unittest.mock import MagicMock
+
+        mock_vector = MagicMock()
+        mock_vector.search.return_value = [(1, 0.9)]
+
+        mock_bm25 = MagicMock()
+        mock_bm25.search.return_value = [(2, 0.8), (3, 0.6)]
+
+        hybrid = HybridSearch(
+            vector_search=mock_vector,
+            bm25_search=mock_bm25
+        )
+
+        # Pass None for embedding - should use BM25 only
+        results = hybrid.search(None, 'test query', top_k=10)
+
+        # Should only call BM25, not vector search
+        mock_bm25.search.assert_called_once_with('test query', top_k=10)
+        mock_vector.search.assert_not_called()
+
+        # Results should be BM25 results only
+        chunk_ids = [r[0] for r in results]
+        self.assertEqual(chunk_ids, [2, 3])
+
+    def test_hybrid_search_bm25_foundation_with_embedding(self):
+        """HybridSearch should call BM25 first, then merge with vector."""
+        from rag_system.search.hybrid_search import HybridSearch
+        from unittest.mock import MagicMock, call
+
+        mock_vector = MagicMock()
+        mock_vector.search.return_value = [(1, 0.9)]
+
+        mock_bm25 = MagicMock()
+        mock_bm25.search.return_value = [(1, 0.8)]
+
+        hybrid = HybridSearch(
+            vector_search=mock_vector,
+            bm25_search=mock_bm25
+        )
+
+        # Pass embedding - should use both
+        results = hybrid.search([0.1, 0.2], 'test query', top_k=10)
+
+        # Both should be called
+        mock_bm25.search.assert_called_once()
+        mock_vector.search.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()
