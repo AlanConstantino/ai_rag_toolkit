@@ -1,8 +1,8 @@
 #!/bin/bash
-# Run health checks
+# Rebuild the BM25 search index
 #
 # Usage:
-#   ./scripts/health.sh
+#   ./scripts/rebuild-index.sh
 
 set -e
 cd "$(dirname "$0")/.."
@@ -11,4 +11,4 @@ if [[ -f .env ]]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-python -m rag_system.main health
+python -m rag_system.main rebuild-index
