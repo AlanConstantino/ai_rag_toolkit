@@ -59,6 +59,28 @@ RAG_MAX_PAGES=1000             # Crawl limit
 
 See `.env.example` for all options.
 
+## Crawling Authenticated Sites
+
+For websites that require HTTP Basic Auth:
+
+```bash
+# Using username and password
+./scripts/crawl.sh https://private.example.com \
+    --basic-auth-user myuser \
+    --basic-auth-pass mypassword
+
+# Or using a pre-encoded Base64 token
+./scripts/crawl.sh https://private.example.com \
+    --basic-auth-token dXNlcm5hbWU6cGFzc3dvcmQ=
+```
+
+You can also set credentials via environment variables:
+```bash
+RAG_BASIC_AUTH_ENABLED=true
+RAG_BASIC_AUTH_USERNAME=myuser
+RAG_BASIC_AUTH_PASSWORD=mypassword
+```
+
 ## Usage Guide
 
 See [USAGE.md](USAGE.md) for detailed instructions.
