@@ -35,6 +35,18 @@ echo 'OPENAI_API_KEY=sk-your-key' >> .env
 ./scripts/crawl.sh https://docs.example.com --unlimited
 ```
 
+### Crawl authenticated websites (HTTP Basic Auth)
+```bash
+# Using username and password
+./scripts/crawl.sh https://private.example.com \
+    --basic-auth-user myuser \
+    --basic-auth-pass mypassword
+
+# Using a pre-encoded Base64 token
+./scripts/crawl.sh https://private.example.com \
+    --basic-auth-token dXNlcm5hbWU6cGFzc3dvcmQ=
+```
+
 ### Search without AI
 ```bash
 ./scripts/search.sh "configuration"
@@ -60,6 +72,13 @@ RAG_AI_ENABLED=false
 
 # Optional: change database location
 RAG_DATABASE_PATH=my_docs.db
+
+# Optional: HTTP Basic Auth for authenticated sites
+RAG_BASIC_AUTH_ENABLED=true
+RAG_BASIC_AUTH_USERNAME=myuser
+RAG_BASIC_AUTH_PASSWORD=mypassword
+# Or use a pre-encoded token (takes precedence over username/password):
+# RAG_BASIC_AUTH_TOKEN=dXNlcm5hbWU6cGFzc3dvcmQ=
 ```
 
 See `.env.example` for all options.
