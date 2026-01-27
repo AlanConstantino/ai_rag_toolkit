@@ -4,6 +4,7 @@ All settings can be overridden via environment variables with RAG_ prefix.
 Includes validation to catch misconfigurations at startup.
 """
 
+import base64
 import os
 from typing import List, Optional, Tuple
 
@@ -89,6 +90,23 @@ CRAWLER_RETRY_STATUS_CODES: List[int] = [
     for code in os.environ.get('RAG_CRAWLER_RETRY_STATUS_CODES', '500,502,503,504').split(',')
     if code.strip()
 ]
+
+# =============================================================================
+# HTTP Basic Auth for Crawler
+# =============================================================================
+
+# Enable HTTP Basic Auth for crawling authenticated websites
+BASIC_AUTH_ENABLED: bool = os.environ.get('RAG_BASIC_AUTH_ENABLED', 'false').lower() in ('true', '1', 'yes')
+
+# Username for Basic Auth (used if BASIC_AUTH_TOKEN not provided)
+BASIC_AUTH_USERNAME: Optional[str] = os.environ.get('RAG_BASIC_AUTH_USERNAME', None)
+
+# Password for Basic Auth (used if BASIC_AUTH_TOKEN not provided)
+BASIC_AUTH_PASSWORD: Optional[str] = os.environ.get('RAG_BASIC_AUTH_PASSWORD', None)
+
+# Pre-encoded Base64 token (takes precedence over username:password)
+# Format: base64(username:password)
+BASIC_AUTH_TOKEN: Optional[str] = os.environ.get('RAG_BASIC_AUTH_TOKEN', None)
 
 # =============================================================================
 # Main Content Detection
@@ -405,6 +423,17 @@ def validate_config(require_apis: bool = False) -> Tuple[bool, List[str]]:
             f"RAG_QUERY_CACHE_TTL must be non-negative, got {QUERY_CACHE_TTL}"
         )
 
+    # Validate Basic Auth settings
+    if BASIC_AUTH_ENABLED:
+        if not BASIC_AUTH_TOKEN:
+            # If no pre-encoded token, both username and password are required
+            if not BASIC_AUTH_USERNAME or not BASIC_AUTH_PASSWORD:
+                errors.append(
+                    "RAG_BASIC_AUTH_ENABLED is true but credentials are incomplete. "
+                    "Provide either RAG_BASIC_AUTH_TOKEN or both "
+                    "RAG_BASIC_AUTH_USERNAME and RAG_BASIC_AUTH_PASSWORD"
+                )
+
     return (len(errors) == 0, errors)
 
 
@@ -423,3 +452,36 @@ def validate_or_raise(require_apis: bool = False) -> None:
             f"  - {error}" for error in errors
         )
         raise ConfigurationError(error_msg)
+
+
+def get_basic_auth_token(username: Optional[str] = None,
+                         password: Optional[str] = None,
+                         token: Optional[str] = None) -> Optional[str]:
+    """Get the HTTP Basic Auth token for crawler authentication.
+
+    If a pre-encoded token is provided, it is returned as-is.
+    Otherwise, encodes username:password as base64.
+
+    Args:
+        username: Username (defaults to BASIC_AUTH_USERNAME config).
+        password: Password (defaults to BASIC_AUTH_PASSWORD config).
+        token: Pre-encoded base64 token (defaults to BASIC_AUTH_TOKEN config).
+
+    Returns:
+        Base64-encoded token string, or None if auth is not configured.
+    """
+    # Use provided values or fall back to config
+    token = token or BASIC_AUTH_TOKEN
+    username = username or BASIC_AUTH_USERNAME
+    password = password or BASIC_AUTH_PASSWORD
+
+    # Pre-encoded token takes precedence
+    if token:
+        return token
+
+    # Encode username:password
+    if username and password:
+        credentials = f"{username}:{password}"
+        return base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
+
+    return None

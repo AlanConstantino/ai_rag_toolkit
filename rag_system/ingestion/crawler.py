@@ -659,7 +659,8 @@ class Crawler:
                  max_pages: int = 1000, delay: float = 1.0,
                  cache_dir: Optional[str] = None,
                  ignore_robots: bool = False,
-                 allow_private_urls: bool = False):
+                 allow_private_urls: bool = False,
+                 basic_auth_token: Optional[str] = None):
         """Initialize the crawler.
 
         Args:
@@ -675,6 +676,9 @@ class Crawler:
                       If None, caching is disabled.
             ignore_robots: If True, ignore robots.txt restrictions.
             allow_private_urls: If True, allow crawling private/internal URLs.
+            basic_auth_token: Optional Base64-encoded token for HTTP Basic Auth.
+                            Format: base64(username:password). When provided,
+                            sends 'Authorization: Basic <token>' header with requests.
         """
         self.start_url = normalize_url(start_url)
         self.allowed_domains = allowed_domains
@@ -684,6 +688,7 @@ class Crawler:
         self.delay = delay
         self.ignore_robots = ignore_robots
         self.allow_private_urls = allow_private_urls
+        self.basic_auth_token = basic_auth_token
 
         # Set up HTTP cache if directory specified
         self.cache: Optional[HTTPCache] = None
@@ -692,6 +697,9 @@ class Crawler:
 
         if self.ignore_robots:
             logger.info("Ignoring robots.txt restrictions")
+
+        if self.basic_auth_token:
+            logger.info("HTTP Basic Auth enabled for crawling")
 
         self.visited: Set[str] = set()
         self.queue: List[str] = [self.start_url]
@@ -708,10 +716,13 @@ class Crawler:
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
 
         try:
-            request = urllib.request.Request(
-                robots_url,
-                headers={'User-Agent': self.USER_AGENT}
-            )
+            headers = {'User-Agent': self.USER_AGENT}
+
+            # Add Basic Auth header if token is configured
+            if self.basic_auth_token:
+                headers['Authorization'] = f'Basic {self.basic_auth_token}'
+
+            request = urllib.request.Request(robots_url, headers=headers)
             with urllib.request.urlopen(request, timeout=10) as response:
                 return response.read().decode('utf-8', errors='ignore')
         except urllib.error.HTTPError as e:
@@ -737,13 +748,16 @@ class Crawler:
             urllib.error.HTTPError: If the request fails.
             urllib.error.URLError: If the connection fails.
         """
-        request = urllib.request.Request(
-            url,
-            headers={
-                'User-Agent': self.USER_AGENT,
-                'Accept': 'text/html,application/xhtml+xml',
-            }
-        )
+        headers = {
+            'User-Agent': self.USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml',
+        }
+
+        # Add Basic Auth header if token is configured
+        if self.basic_auth_token:
+            headers['Authorization'] = f'Basic {self.basic_auth_token}'
+
+        request = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(request, timeout=30) as response:
             content = response.read().decode('utf-8', errors='replace')
             status = response.status

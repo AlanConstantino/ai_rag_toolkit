@@ -136,6 +136,18 @@ def create_parser() -> argparse.ArgumentParser:
         '--fresh', action='store_true',
         help='Start a new crawl even if a resumable session exists'
     )
+    ingest_parser.add_argument(
+        '--basic-auth-user',
+        help='Username for HTTP Basic Auth'
+    )
+    ingest_parser.add_argument(
+        '--basic-auth-pass',
+        help='Password for HTTP Basic Auth'
+    )
+    ingest_parser.add_argument(
+        '--basic-auth-token',
+        help='Pre-encoded Base64 token for HTTP Basic Auth (overrides user/pass)'
+    )
 
     # Query command
     query_parser = subparsers.add_parser('query', help='Query the system')
@@ -519,7 +531,8 @@ class RAGSystem:
         return result
 
     def ingest(self, start_url: str, max_pages: int = None,
-                ignore_robots: bool = False, fresh: bool = False) -> Dict[str, Any]:
+                ignore_robots: bool = False, fresh: bool = False,
+                basic_auth_token: Optional[str] = None) -> Dict[str, Any]:
         """Ingest documentation from URL.
 
         Supports resuming interrupted crawls. If a previous crawl for the same
@@ -531,6 +544,7 @@ class RAGSystem:
             max_pages: Maximum pages to crawl.
             ignore_robots: If True, ignore robots.txt restrictions.
             fresh: If True, start a new crawl even if a resumable session exists.
+            basic_auth_token: Optional Base64-encoded token for HTTP Basic Auth.
 
         Returns:
             Ingestion statistics.
@@ -558,7 +572,8 @@ class RAGSystem:
             max_pages=max_pages,
             delay=config.CRAWL_DELAY_SECONDS,
             ignore_robots=ignore_robots,
-            fresh=fresh
+            fresh=fresh,
+            basic_auth_token=basic_auth_token
         )
 
     def get_stats(self) -> Dict[str, int]:
@@ -785,12 +800,35 @@ def main() -> None:
                 print(f"Ingesting from {args.url} (max {max_pages} pages)...")
             if args.fresh:
                 print("Starting fresh crawl (ignoring any existing session)...")
+
+            # Get Basic Auth token from CLI args or config
+            basic_auth_token = None
+            cli_token = getattr(args, 'basic_auth_token', None)
+            cli_user = getattr(args, 'basic_auth_user', None)
+            cli_pass = getattr(args, 'basic_auth_pass', None)
+
+            if cli_token or cli_user or cli_pass:
+                # CLI args take precedence
+                basic_auth_token = config.get_basic_auth_token(
+                    username=cli_user,
+                    password=cli_pass,
+                    token=cli_token
+                )
+                if basic_auth_token:
+                    print("Using HTTP Basic Auth from command line...")
+            elif config.BASIC_AUTH_ENABLED:
+                # Fall back to config/environment variables
+                basic_auth_token = config.get_basic_auth_token()
+                if basic_auth_token:
+                    print("Using HTTP Basic Auth from environment...")
+
             try:
                 stats = rag.ingest(
                     args.url,
                     max_pages=max_pages,
                     ignore_robots=args.ignore_robots,
-                    fresh=args.fresh
+                    fresh=args.fresh,
+                    basic_auth_token=basic_auth_token
                 )
                 resumed_msg = " (resumed)" if stats.get('resumed') else ""
                 print(f"Crawled {stats['pages_crawled']} pages{resumed_msg}, indexed {stats['pages_indexed']}, skipped {stats['pages_skipped']}, errors: {stats['errors']}")

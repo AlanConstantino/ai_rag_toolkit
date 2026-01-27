@@ -303,7 +303,8 @@ class Indexer:
                         max_pages: int = 1000,
                         delay: float = 1.0,
                         ignore_robots: bool = False,
-                        fresh: bool = False) -> Dict[str, int]:
+                        fresh: bool = False,
+                        basic_auth_token: Optional[str] = None) -> Dict[str, int]:
         """Crawl a website and index all pages.
 
         Supports resuming interrupted crawls. If a previous crawl for the same
@@ -320,6 +321,7 @@ class Indexer:
             delay: Delay between requests.
             ignore_robots: If True, ignore robots.txt restrictions.
             fresh: If True, start a new crawl even if a resumable session exists.
+            basic_auth_token: Optional Base64-encoded token for HTTP Basic Auth.
 
         Returns:
             Dict with crawl/index statistics.
@@ -355,7 +357,8 @@ class Indexer:
                 max_pages=max_pages,
                 delay=delay,
                 cache_dir=os.environ.get('RAG_HTTP_CACHE_DIR'),
-                ignore_robots=ignore_robots
+                ignore_robots=ignore_robots,
+                basic_auth_token=basic_auth_token
             )
 
             # If resuming, load queue from database
