@@ -18,7 +18,9 @@ from rag_system.database import (
     update_session_status, update_session_stats, acquire_session_lock,
     add_urls_to_crawl_queue, get_crawl_queue_urls, clear_crawl_queue,
     create_embedding_job, update_embedding_job_progress, update_embedding_job_status,
-    get_chunks_without_embeddings
+    get_chunks_without_embeddings,
+    insert_entity, insert_relationship, link_chunk_to_entity, get_entity_by_name,
+    get_all_pages
 )
 from rag_system.shutdown import is_shutdown_requested
 from rag_system.ingestion.crawler import Crawler
@@ -679,6 +681,134 @@ class Indexer:
                 'chunks_with_embeddings': chunks_with_embeddings,
                 'total_entities': total_entities
             }
+
+        finally:
+            conn.close()
+
+    def extract_entities(self, page_id: Optional[int] = None) -> Dict[str, Any]:
+        """Extract entities from pages as a post-processing step.
+
+        This is a standalone operation that runs after crawling is complete.
+        It extracts entities from page text and stores them in the database.
+
+        Args:
+            page_id: Optional specific page ID to process. If None, processes
+                     all pages that haven't had entities extracted yet.
+
+        Returns:
+            Dict with statistics about the extraction operation.
+        """
+        if not self.chat_client:
+            logger.warning("No chat client configured for entity extraction")
+            return {'error': 'No chat client configured'}
+
+        from rag_system.knowledge_graph.entity_extractor import EntityExtractor
+
+        stats = {
+            'pages_processed': 0,
+            'entities_extracted': 0,
+            'relationships_extracted': 0,
+            'errors': 0
+        }
+
+        conn = get_connection(self.db_path)
+        try:
+            # Get pages to process
+            if page_id:
+                cursor = conn.execute(
+                    "SELECT id, parsed_text FROM pages WHERE id = ?",
+                    (page_id,)
+                )
+            else:
+                # Get pages that don't have entities yet
+                cursor = conn.execute("""
+                    SELECT p.id, p.parsed_text FROM pages p
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM chunk_entities ce
+                        JOIN chunks c ON ce.chunk_id = c.id
+                        WHERE c.page_id = p.id
+                    )
+                """)
+
+            pages = cursor.fetchall()
+            total_pages = len(pages)
+
+            if total_pages == 0:
+                logger.info("No pages found needing entity extraction")
+                return stats
+
+            logger.info(f"Extracting entities from {total_pages} pages...")
+            extractor = EntityExtractor(self.chat_client)
+
+            for page in pages:
+                page_id = page['id']
+                text = page['parsed_text'] or ''
+
+                if not text.strip():
+                    continue
+
+                try:
+                    # Extract entities
+                    result = extractor.extract(text)
+                    entities = result.get('entities', [])
+                    relationships = result.get('relationships', [])
+
+                    # Get chunk IDs for this page
+                    chunk_cursor = conn.execute(
+                        "SELECT id FROM chunks WHERE page_id = ?",
+                        (page_id,)
+                    )
+                    chunk_ids = [row['id'] for row in chunk_cursor.fetchall()]
+
+                    # Store entities
+                    entity_ids = {}
+                    for entity in entities:
+                        name = entity.get('name', '')
+                        entity_type = entity.get('type', 'concept')
+                        description = entity.get('description', '')
+
+                        if not name:
+                            continue
+
+                        existing = get_entity_by_name(conn, name)
+                        if existing:
+                            entity_id = existing['id']
+                        else:
+                            entity_id = insert_entity(conn, name, entity_type, description)
+                            stats['entities_extracted'] += 1
+
+                        entity_ids[name] = entity_id
+
+                        # Link entity to chunks
+                        for chunk_id in chunk_ids:
+                            link_chunk_to_entity(conn, chunk_id, entity_id)
+
+                    # Store relationships
+                    for rel in relationships:
+                        source_name = rel.get('source', '')
+                        target_name = rel.get('target', '')
+                        rel_type = rel.get('type', 'related_to')
+                        description = rel.get('description', '')
+
+                        source_id = entity_ids.get(source_name)
+                        target_id = entity_ids.get(target_name)
+
+                        if source_id and target_id:
+                            insert_relationship(conn, source_id, target_id, rel_type, description)
+                            stats['relationships_extracted'] += 1
+
+                    stats['pages_processed'] += 1
+                    logger.debug(f"Extracted {len(entities)} entities from page {page_id}")
+
+                except Exception as e:
+                    logger.warning(f"Entity extraction failed for page {page_id}: {e}")
+                    stats['errors'] += 1
+
+                # Progress logging
+                if stats['pages_processed'] % 10 == 0:
+                    logger.info(f"Progress: {stats['pages_processed']}/{total_pages} pages")
+
+            return stats
 
         finally:
             conn.close()

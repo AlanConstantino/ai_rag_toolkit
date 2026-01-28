@@ -173,6 +173,20 @@ def create_parser() -> argparse.ArgumentParser:
     # Rebuild BM25 index command
     subparsers.add_parser('rebuild-index', help='Rebuild the BM25 search index')
 
+    # Extract entities command
+    extract_entities_parser = subparsers.add_parser(
+        'extract-entities',
+        help='Extract entities from pages (post-processing step)'
+    )
+    extract_entities_parser.add_argument(
+        '--page-id', type=int,
+        help='Only extract entities for a specific page ID'
+    )
+    extract_entities_parser.add_argument(
+        '--json', action='store_true',
+        help='Output results as JSON'
+    )
+
     # Stats command
     subparsers.add_parser('stats', help='Show system statistics')
 
@@ -1079,6 +1093,34 @@ def main() -> None:
                     print("Warning: Index may not have built correctly")
             finally:
                 conn.close()
+
+        elif args.command == 'extract-entities':
+            if not rag.chat_client:
+                print("Error: No chat client configured.")
+                print("Set OPENAI_API_KEY or configure RAG_CHAT_API_ENDPOINT")
+                import sys
+                sys.exit(1)
+
+            from rag_system.ingestion.indexer import Indexer
+            import json as json_module
+
+            print("Extracting entities from pages...")
+            indexer = Indexer(args.db, chat_client=rag.chat_client)
+            stats = indexer.extract_entities(page_id=args.page_id)
+
+            if args.json:
+                print(json_module.dumps(stats, indent=2))
+            else:
+                if stats.get('error'):
+                    print(f"Error: {stats['error']}")
+                else:
+                    print("Entity Extraction Results")
+                    print("=" * 40)
+                    print(f"Pages processed: {stats['pages_processed']}")
+                    print(f"Entities extracted: {stats['entities_extracted']}")
+                    print(f"Relationships extracted: {stats['relationships_extracted']}")
+                    if stats['errors'] > 0:
+                        print(f"Errors: {stats['errors']}")
 
         elif args.command == 'backfill':
             if not rag.vector_client:
