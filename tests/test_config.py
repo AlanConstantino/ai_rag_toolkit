@@ -291,6 +291,55 @@ class TestConfigValidation(unittest.TestCase):
             self.assertFalse(is_valid)
             self.assertTrue(any('CRAWLER_MAX_RETRIES' in e for e in errors))
 
+    def test_embedding_stop_on_rate_limit_default(self):
+        """EMBEDDING_STOP_ON_RATE_LIMIT should default to True."""
+        env = {k: v for k, v in os.environ.items() if k != 'RAG_EMBEDDING_STOP_ON_RATE_LIMIT'}
+        with mock.patch.dict(os.environ, env, clear=True):
+            import importlib
+            from rag_system import config
+            importlib.reload(config)
+
+            self.assertTrue(config.EMBEDDING_STOP_ON_RATE_LIMIT)
+
+    def test_embedding_stop_on_rate_limit_false(self):
+        """EMBEDDING_STOP_ON_RATE_LIMIT should be False when set to false."""
+        with mock.patch.dict(os.environ, {'RAG_EMBEDDING_STOP_ON_RATE_LIMIT': 'false'}):
+            import importlib
+            from rag_system import config
+            importlib.reload(config)
+
+            self.assertFalse(config.EMBEDDING_STOP_ON_RATE_LIMIT)
+
+    def test_embedding_retry_delay_default(self):
+        """EMBEDDING_RETRY_DELAY should default to 1.0."""
+        env = {k: v for k, v in os.environ.items() if k != 'RAG_EMBEDDING_RETRY_DELAY'}
+        with mock.patch.dict(os.environ, env, clear=True):
+            import importlib
+            from rag_system import config
+            importlib.reload(config)
+
+            self.assertEqual(config.EMBEDDING_RETRY_DELAY, 1.0)
+
+    def test_embedding_retry_delay_custom(self):
+        """EMBEDDING_RETRY_DELAY should use custom value from environment."""
+        with mock.patch.dict(os.environ, {'RAG_EMBEDDING_RETRY_DELAY': '2.5'}):
+            import importlib
+            from rag_system import config
+            importlib.reload(config)
+
+            self.assertEqual(config.EMBEDDING_RETRY_DELAY, 2.5)
+
+    def test_embedding_retry_delay_negative_fails(self):
+        """Negative EMBEDDING_RETRY_DELAY should fail validation."""
+        with mock.patch.dict(os.environ, {'RAG_EMBEDDING_RETRY_DELAY': '-1.0'}):
+            import importlib
+            from rag_system import config
+            importlib.reload(config)
+
+            is_valid, errors = config.validate_config()
+            self.assertFalse(is_valid)
+            self.assertTrue(any('EMBEDDING_RETRY_DELAY' in e for e in errors))
+
 
 class TestConfigurationError(unittest.TestCase):
     """Test ConfigurationError exception."""

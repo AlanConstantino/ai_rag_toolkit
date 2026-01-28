@@ -491,6 +491,36 @@ class TestCustomExceptions(unittest.TestCase):
 
         self.assertTrue(issubclass(TimeoutError, APIError))
 
+    def test_rate_limit_error_is_api_error(self):
+        """RateLimitError should be subclass of APIError."""
+        from rag_system.api_client import APIError, RateLimitError
+
+        self.assertTrue(issubclass(RateLimitError, APIError))
+
+    def test_rate_limit_error_has_retry_after(self):
+        """RateLimitError should store retry_after attribute."""
+        from rag_system.api_client import RateLimitError
+
+        error = RateLimitError(
+            message="Rate limit exceeded",
+            retry_after=30.5,
+            status_code=429,
+            response='{"error": "Too Many Requests"}'
+        )
+        self.assertEqual(str(error), "Rate limit exceeded")
+        self.assertEqual(error.retry_after, 30.5)
+        self.assertEqual(error.status_code, 429)
+        self.assertEqual(error.response, '{"error": "Too Many Requests"}')
+
+    def test_rate_limit_error_default_values(self):
+        """RateLimitError should have sensible defaults."""
+        from rag_system.api_client import RateLimitError
+
+        error = RateLimitError()
+        self.assertEqual(str(error), "API rate limit exceeded")
+        self.assertIsNone(error.retry_after)
+        self.assertEqual(error.status_code, 429)
+
 
 class TestRetryBehavior(unittest.TestCase):
     """Test HTTP request retry behavior."""

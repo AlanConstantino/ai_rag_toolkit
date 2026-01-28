@@ -51,6 +51,20 @@ class TimeoutError(APIError):
         super().__init__(message)
 
 
+class RateLimitError(APIError):
+    """Exception raised when API rate limit is exceeded.
+
+    Includes retry_after attribute indicating how long to wait before retrying.
+    """
+
+    def __init__(self, message: str = "API rate limit exceeded",
+                 retry_after: Optional[float] = None,
+                 status_code: Optional[int] = 429,
+                 response: Optional[str] = None):
+        super().__init__(message, status_code=status_code, response=response)
+        self.retry_after = retry_after
+
+
 # =============================================================================
 # Circuit Breaker Implementation
 # =============================================================================

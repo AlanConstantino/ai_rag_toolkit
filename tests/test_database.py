@@ -1251,5 +1251,291 @@ class TestCrawlSessionLocking(unittest.TestCase):
         conn.close()
 
 
+class TestEmbeddingJobsSchema(unittest.TestCase):
+    """Test embedding jobs schema creation."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_init_db_creates_embedding_jobs_table(self):
+        """init_db should create embedding_jobs table."""
+        from rag_system.database import init_db
+
+        init_db(self.temp_path)
+
+        conn = sqlite3.connect(self.temp_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cursor.fetchall()}
+
+        self.assertIn('embedding_jobs', tables)
+        conn.close()
+
+    def test_embedding_jobs_table_has_required_columns(self):
+        """embedding_jobs table should have all required columns."""
+        from rag_system.database import init_db
+
+        init_db(self.temp_path)
+
+        conn = sqlite3.connect(self.temp_path)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(embedding_jobs)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        expected_columns = {
+            'id', 'page_id', 'status',
+            'chunks_total', 'chunks_embedded', 'chunks_skipped', 'chunks_failed',
+            'started_at', 'completed_at', 'error_message'
+        }
+        self.assertTrue(expected_columns.issubset(columns),
+                       f"Missing columns: {expected_columns - columns}")
+        conn.close()
+
+
+class TestEmbeddingJobOperations(unittest.TestCase):
+    """Test embedding job CRUD operations."""
+
+    def setUp(self):
+        """Create a temporary database with a page for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page
+        init_db(self.temp_path)
+        conn = get_connection(self.temp_path)
+        self.page_id = insert_page(
+            conn, 'https://example.com', 'Test Page', '', '', 'abc123'
+        )
+        conn.close()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_create_embedding_job(self):
+        """create_embedding_job should create a new job and return its ID."""
+        from rag_system.database import get_connection, create_embedding_job
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, self.page_id, chunks_total=100)
+
+        self.assertIsInstance(job_id, int)
+        self.assertGreater(job_id, 0)
+        conn.close()
+
+    def test_create_embedding_job_global(self):
+        """create_embedding_job should work with page_id=None for global jobs."""
+        from rag_system.database import get_connection, create_embedding_job
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, None, chunks_total=500)
+
+        self.assertIsInstance(job_id, int)
+        self.assertGreater(job_id, 0)
+        conn.close()
+
+    def test_get_embedding_job(self):
+        """get_embedding_job should retrieve job by ID."""
+        from rag_system.database import get_connection, create_embedding_job, get_embedding_job
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, self.page_id, chunks_total=100)
+
+        job = get_embedding_job(conn, job_id)
+
+        self.assertIsNotNone(job)
+        self.assertEqual(job['page_id'], self.page_id)
+        self.assertEqual(job['status'], 'in_progress')
+        self.assertEqual(job['chunks_total'], 100)
+        self.assertEqual(job['chunks_embedded'], 0)
+        conn.close()
+
+    def test_get_embedding_job_not_found(self):
+        """get_embedding_job should return None for non-existent job."""
+        from rag_system.database import get_connection, get_embedding_job
+
+        conn = get_connection(self.temp_path)
+        job = get_embedding_job(conn, 9999)
+
+        self.assertIsNone(job)
+        conn.close()
+
+    def test_get_active_embedding_job(self):
+        """get_active_embedding_job should find in_progress or interrupted jobs."""
+        from rag_system.database import (
+            get_connection, create_embedding_job, get_active_embedding_job
+        )
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, self.page_id, chunks_total=100)
+
+        active_job = get_active_embedding_job(conn, self.page_id)
+
+        self.assertIsNotNone(active_job)
+        self.assertEqual(active_job['id'], job_id)
+        conn.close()
+
+    def test_get_active_embedding_job_global(self):
+        """get_active_embedding_job should find global jobs when page_id is None."""
+        from rag_system.database import (
+            get_connection, create_embedding_job, get_active_embedding_job
+        )
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, None, chunks_total=500)
+
+        active_job = get_active_embedding_job(conn, None)
+
+        self.assertIsNotNone(active_job)
+        self.assertEqual(active_job['id'], job_id)
+        conn.close()
+
+    def test_get_active_embedding_job_ignores_completed(self):
+        """get_active_embedding_job should not return completed jobs."""
+        from rag_system.database import (
+            get_connection, create_embedding_job, get_active_embedding_job,
+            update_embedding_job_status
+        )
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, self.page_id, chunks_total=100)
+        update_embedding_job_status(conn, job_id, 'completed')
+
+        active_job = get_active_embedding_job(conn, self.page_id)
+
+        self.assertIsNone(active_job)
+        conn.close()
+
+    def test_update_embedding_job_progress(self):
+        """update_embedding_job_progress should update counters."""
+        from rag_system.database import (
+            get_connection, create_embedding_job, get_embedding_job,
+            update_embedding_job_progress
+        )
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, self.page_id, chunks_total=100)
+
+        update_embedding_job_progress(
+            conn, job_id,
+            chunks_embedded=50,
+            chunks_skipped=10,
+            chunks_failed=5
+        )
+
+        job = get_embedding_job(conn, job_id)
+        self.assertEqual(job['chunks_embedded'], 50)
+        self.assertEqual(job['chunks_skipped'], 10)
+        self.assertEqual(job['chunks_failed'], 5)
+        conn.close()
+
+    def test_update_embedding_job_status(self):
+        """update_embedding_job_status should change job status."""
+        from rag_system.database import (
+            get_connection, create_embedding_job, get_embedding_job,
+            update_embedding_job_status
+        )
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, self.page_id, chunks_total=100)
+
+        update_embedding_job_status(conn, job_id, 'completed')
+
+        job = get_embedding_job(conn, job_id)
+        self.assertEqual(job['status'], 'completed')
+        self.assertIsNotNone(job['completed_at'])
+        conn.close()
+
+    def test_update_embedding_job_status_with_error(self):
+        """update_embedding_job_status should store error messages."""
+        from rag_system.database import (
+            get_connection, create_embedding_job, get_embedding_job,
+            update_embedding_job_status
+        )
+
+        conn = get_connection(self.temp_path)
+        job_id = create_embedding_job(conn, self.page_id, chunks_total=100)
+
+        update_embedding_job_status(
+            conn, job_id, 'failed',
+            error_message='Rate limit exceeded'
+        )
+
+        job = get_embedding_job(conn, job_id)
+        self.assertEqual(job['status'], 'failed')
+        self.assertEqual(job['error_message'], 'Rate limit exceeded')
+        conn.close()
+
+    def test_list_embedding_jobs(self):
+        """list_embedding_jobs should return all jobs."""
+        from rag_system.database import (
+            get_connection, create_embedding_job, list_embedding_jobs
+        )
+
+        conn = get_connection(self.temp_path)
+        create_embedding_job(conn, self.page_id, chunks_total=100)
+        create_embedding_job(conn, None, chunks_total=200)
+
+        jobs = list_embedding_jobs(conn)
+
+        self.assertEqual(len(jobs), 2)
+        conn.close()
+
+    def test_get_chunks_without_embeddings(self):
+        """get_chunks_without_embeddings should return chunks missing embeddings."""
+        from rag_system.database import (
+            get_connection, insert_chunk, update_chunk_embedding,
+            get_chunks_without_embeddings
+        )
+
+        conn = get_connection(self.temp_path)
+
+        # Create chunks - one with embedding, one without
+        chunk1_id = insert_chunk(
+            conn, self.page_id, 'small', 0, 'Content 1', 'Section 1'
+        )
+        chunk2_id = insert_chunk(
+            conn, self.page_id, 'small', 1, 'Content 2', 'Section 2'
+        )
+
+        # Add embedding to chunk1 only
+        update_chunk_embedding(conn, chunk1_id, [0.1, 0.2, 0.3])
+
+        chunks = get_chunks_without_embeddings(conn)
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]['id'], chunk2_id)
+        conn.close()
+
+    def test_get_chunks_without_embeddings_by_page(self):
+        """get_chunks_without_embeddings should filter by page_id."""
+        from rag_system.database import (
+            get_connection, insert_page, insert_chunk,
+            get_chunks_without_embeddings
+        )
+
+        conn = get_connection(self.temp_path)
+
+        # Create second page
+        page2_id = insert_page(conn, 'https://example.com/page2', 'Page 2', '', '', 'def456')
+
+        # Create chunks on different pages
+        insert_chunk(conn, self.page_id, 'small', 0, 'Content 1', 'Section 1')
+        insert_chunk(conn, page2_id, 'small', 0, 'Content 2', 'Section 2')
+
+        # Filter by first page only
+        chunks = get_chunks_without_embeddings(conn, self.page_id)
+
+        self.assertEqual(len(chunks), 1)
+        conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()

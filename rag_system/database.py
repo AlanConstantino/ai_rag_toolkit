@@ -266,6 +266,24 @@ CREATE TABLE IF NOT EXISTS crawl_queue (
 );
 
 -- ============================================
+-- EMBEDDING JOB TRACKING
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS embedding_jobs (
+    id INTEGER PRIMARY KEY,
+    page_id INTEGER,
+    status TEXT DEFAULT 'pending',  -- pending, in_progress, completed, failed, interrupted
+    chunks_total INTEGER DEFAULT 0,
+    chunks_embedded INTEGER DEFAULT 0,
+    chunks_skipped INTEGER DEFAULT 0,
+    chunks_failed INTEGER DEFAULT 0,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    error_message TEXT,
+    FOREIGN KEY (page_id) REFERENCES pages(id)
+);
+
+-- ============================================
 -- INDEXES
 -- ============================================
 
@@ -1835,3 +1853,215 @@ def clear_crawl_queue(conn: sqlite3.Connection, session_id: int,
         if auto_commit:
             conn.rollback()
         raise QueryError(f"Failed to clear crawl queue: {e}") from e
+
+
+# =============================================================================
+# Embedding Job Operations
+# =============================================================================
+
+def create_embedding_job(conn: sqlite3.Connection, page_id: Optional[int],
+                          chunks_total: int,
+                          auto_commit: bool = True) -> int:
+    """Create a new embedding job to track progress.
+
+    Args:
+        conn: Database connection.
+        page_id: Optional page ID (None for global backfill jobs).
+        chunks_total: Total number of chunks to embed.
+        auto_commit: If True, commit after insert.
+
+    Returns:
+        ID of the created job.
+
+    Raises:
+        QueryError: If insert fails.
+    """
+    try:
+        cursor = conn.execute(
+            """INSERT INTO embedding_jobs
+               (page_id, status, chunks_total, chunks_embedded, chunks_skipped, chunks_failed, started_at)
+               VALUES (?, 'in_progress', ?, 0, 0, 0, CURRENT_TIMESTAMP)""",
+            (page_id, chunks_total)
+        )
+        if auto_commit:
+            conn.commit()
+        return cursor.lastrowid
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to create embedding job: {e}") from e
+
+
+def get_embedding_job(conn: sqlite3.Connection, job_id: int) -> Optional[Dict[str, Any]]:
+    """Get an embedding job by ID.
+
+    Args:
+        conn: Database connection.
+        job_id: ID of the job to retrieve.
+
+    Returns:
+        Job dict or None if not found.
+    """
+    cursor = conn.execute(
+        "SELECT * FROM embedding_jobs WHERE id = ?",
+        (job_id,)
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_active_embedding_job(conn: sqlite3.Connection,
+                              page_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Find an active or interrupted embedding job.
+
+    Args:
+        conn: Database connection.
+        page_id: Optional page ID to filter by (None for global jobs).
+
+    Returns:
+        Job dict or None if no resumable job exists.
+    """
+    if page_id is not None:
+        cursor = conn.execute(
+            """SELECT * FROM embedding_jobs
+               WHERE page_id = ? AND status IN ('in_progress', 'interrupted')
+               ORDER BY started_at DESC LIMIT 1""",
+            (page_id,)
+        )
+    else:
+        cursor = conn.execute(
+            """SELECT * FROM embedding_jobs
+               WHERE page_id IS NULL AND status IN ('in_progress', 'interrupted')
+               ORDER BY started_at DESC LIMIT 1"""
+        )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def update_embedding_job_progress(conn: sqlite3.Connection, job_id: int,
+                                   chunks_embedded: int = None,
+                                   chunks_skipped: int = None,
+                                   chunks_failed: int = None,
+                                   auto_commit: bool = True) -> None:
+    """Update embedding job progress counters.
+
+    Args:
+        conn: Database connection.
+        job_id: ID of the job to update.
+        chunks_embedded: Number of chunks successfully embedded.
+        chunks_skipped: Number of chunks skipped (already had embeddings).
+        chunks_failed: Number of chunks that failed to embed.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If update fails.
+    """
+    try:
+        updates = []
+        params = []
+        if chunks_embedded is not None:
+            updates.append("chunks_embedded = ?")
+            params.append(chunks_embedded)
+        if chunks_skipped is not None:
+            updates.append("chunks_skipped = ?")
+            params.append(chunks_skipped)
+        if chunks_failed is not None:
+            updates.append("chunks_failed = ?")
+            params.append(chunks_failed)
+
+        if updates:
+            params.append(job_id)
+            conn.execute(
+                f"UPDATE embedding_jobs SET {', '.join(updates)} WHERE id = ?",
+                params
+            )
+            if auto_commit:
+                conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update embedding job progress: {e}") from e
+
+
+def update_embedding_job_status(conn: sqlite3.Connection, job_id: int,
+                                 status: str, error_message: Optional[str] = None,
+                                 auto_commit: bool = True) -> None:
+    """Update embedding job status.
+
+    Args:
+        conn: Database connection.
+        job_id: ID of the job to update.
+        status: New status ('in_progress', 'completed', 'failed', 'interrupted').
+        error_message: Optional error message for failed jobs.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If update fails.
+    """
+    try:
+        if status in ('completed', 'failed'):
+            conn.execute(
+                """UPDATE embedding_jobs
+                   SET status = ?, error_message = ?, completed_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (status, error_message, job_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE embedding_jobs SET status = ?, error_message = ? WHERE id = ?",
+                (status, error_message, job_id)
+            )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update embedding job status: {e}") from e
+
+
+def list_embedding_jobs(conn: sqlite3.Connection,
+                         limit: int = 50) -> List[Dict[str, Any]]:
+    """List all embedding jobs.
+
+    Args:
+        conn: Database connection.
+        limit: Maximum number of jobs to return.
+
+    Returns:
+        List of job dicts ordered by started_at descending.
+    """
+    cursor = conn.execute(
+        "SELECT * FROM embedding_jobs ORDER BY started_at DESC, id DESC LIMIT ?",
+        (limit,)
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def get_chunks_without_embeddings(conn: sqlite3.Connection,
+                                   page_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Get all chunks that don't have embeddings.
+
+    Args:
+        conn: Database connection.
+        page_id: Optional page ID to filter by.
+
+    Returns:
+        List of chunk dicts with id, content, heading_path, and page title.
+    """
+    if page_id is not None:
+        cursor = conn.execute("""
+            SELECT c.id, c.content, c.heading_path, p.title
+            FROM chunks c
+            JOIN pages p ON c.page_id = p.id
+            WHERE c.embedding_json IS NULL AND c.page_id = ?
+            ORDER BY c.id
+        """, (page_id,))
+    else:
+        cursor = conn.execute("""
+            SELECT c.id, c.content, c.heading_path, p.title
+            FROM chunks c
+            JOIN pages p ON c.page_id = p.id
+            WHERE c.embedding_json IS NULL
+            ORDER BY c.id
+        """)
+    return [dict(row) for row in cursor.fetchall()]
