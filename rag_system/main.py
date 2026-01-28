@@ -405,22 +405,22 @@ class RAGSystem:
 
         # Search - use BM25 only if no vector client, otherwise hybrid
         all_results = []
-        embedding_start = time.time()
         search_start = time.time()
 
-        for q in expanded:
-            # BM25 is always the foundation
-            # Vector search enhances when AI is enabled and vector_client available
-            query_embedding = None
+        # Batch embed all expanded queries at once for performance
+        query_embeddings: List[Optional[List[float]]] = []
+        if config.AI_ENABLED and self.vector_client and expanded:
+            try:
+                embed_start = time.time()
+                query_embeddings = self.vector_client.get_embeddings_batch(expanded)
+                timing_metrics['embedding_time'] = time.time() - embed_start
+            except Exception as e:
+                logger.warning(f"Vector embedding failed, using BM25 only: {e}")
+                query_embeddings = [None] * len(expanded)
+        else:
+            query_embeddings = [None] * len(expanded)
 
-            if config.AI_ENABLED and self.vector_client:
-                try:
-                    embed_start = time.time()
-                    query_embedding = self.vector_client.get_embedding(q)
-                    timing_metrics['embedding_time'] = timing_metrics.get('embedding_time', 0) + (time.time() - embed_start)
-                except Exception as e:
-                    logger.warning(f"Vector embedding failed, using BM25 only: {e}")
-
+        for q, query_embedding in zip(expanded, query_embeddings):
             # Hybrid search handles None embedding gracefully (returns BM25 only)
             search_op_start = time.time()
             results = self.hybrid_search.search(query_embedding, q)
@@ -486,14 +486,9 @@ class RAGSystem:
         if not cached:
             conn = get_connection(self.db_path)
             try:
-                # Get embedding for caching (use first expanded query)
-                query_embedding = []
-                if self.vector_client and expanded:
-                    try:
-                        query_embedding = self.vector_client.get_embedding(expanded[0])
-                    except Exception:
-                        pass
-                cache_query(conn, query_hash, query_type, expanded, query_embedding)
+                # Reuse first embedding from batch (already computed above)
+                first_query_embedding = query_embeddings[0] if query_embeddings else []
+                cache_query(conn, query_hash, query_type, expanded, first_query_embedding or [])
             finally:
                 conn.close()
 
