@@ -53,7 +53,7 @@ cp .env.example .env
 Key settings:
 ```bash
 OPENAI_API_KEY=sk-your-key     # For AI features
-RAG_AI_ENABLED=true            # Set false for keyword-only mode
+RAG_AI_ENABLED=false           # Set true for AI features
 RAG_MAX_PAGES=1000             # Crawl limit
 ```
 
