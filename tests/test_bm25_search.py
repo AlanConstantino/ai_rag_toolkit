@@ -5,6 +5,67 @@ import tempfile
 import os
 
 
+class TestPorterStemmer(unittest.TestCase):
+    """Test Porter Stemmer implementation."""
+
+    def test_stem_basic_words(self):
+        """PorterStemmer should stem common word forms."""
+        from rag_system.search.bm25_search import PorterStemmer
+
+        stemmer = PorterStemmer()
+
+        # Test plural forms
+        self.assertEqual(stemmer.stem('cats'), 'cat')
+        self.assertEqual(stemmer.stem('ponies'), 'poni')
+
+        # Test -ing forms
+        self.assertEqual(stemmer.stem('running'), 'run')
+        self.assertEqual(stemmer.stem('walking'), 'walk')
+
+        # Test -ed forms
+        self.assertEqual(stemmer.stem('walked'), 'walk')
+        self.assertEqual(stemmer.stem('agreed'), 'agre')
+
+    def test_stem_preserves_short_words(self):
+        """PorterStemmer should preserve very short words."""
+        from rag_system.search.bm25_search import PorterStemmer
+
+        stemmer = PorterStemmer()
+
+        self.assertEqual(stemmer.stem('a'), 'a')
+        self.assertEqual(stemmer.stem('an'), 'an')
+        self.assertEqual(stemmer.stem('be'), 'be')
+
+    def test_stem_caches_results(self):
+        """PorterStemmer should cache results for performance."""
+        from rag_system.search.bm25_search import PorterStemmer
+
+        stemmer = PorterStemmer()
+
+        # First call
+        result1 = stemmer.stem('programming')
+        # Second call (should use cache)
+        result2 = stemmer.stem('programming')
+
+        self.assertEqual(result1, result2)
+        self.assertIn('programming', stemmer._cache)
+
+    def test_stem_common_suffixes(self):
+        """PorterStemmer should handle common suffixes."""
+        from rag_system.search.bm25_search import PorterStemmer
+
+        stemmer = PorterStemmer()
+
+        # -ational -> -ate
+        self.assertEqual(stemmer.stem('relational'), 'relat')
+
+        # -iveness -> -ive
+        self.assertEqual(stemmer.stem('effectiveness'), 'effect')
+
+        # -ization -> -ize
+        self.assertEqual(stemmer.stem('organization'), 'organ')
+
+
 class TestTokenization(unittest.TestCase):
     """Test tokenization for BM25."""
 
@@ -33,6 +94,63 @@ class TestTokenization(unittest.TestCase):
 
         self.assertIn('hello', result)
         self.assertIn('world', result)
+
+    def test_tokenize_splits_camel_case(self):
+        """tokenize_for_bm25 should split camelCase words."""
+        from rag_system.search.bm25_search import tokenize_for_bm25
+
+        result = tokenize_for_bm25("getUserName processDataRequest")
+
+        self.assertIn('get', result)
+        self.assertIn('user', result)
+        self.assertIn('name', result)
+        self.assertIn('process', result)
+        self.assertIn('data', result)
+        self.assertIn('request', result)
+
+    def test_tokenize_splits_snake_case(self):
+        """tokenize_for_bm25 should split snake_case words."""
+        from rag_system.search.bm25_search import tokenize_for_bm25
+
+        result = tokenize_for_bm25("get_user_name process_data")
+
+        self.assertIn('get', result)
+        self.assertIn('user', result)
+        self.assertIn('name', result)
+        self.assertIn('process', result)
+        self.assertIn('data', result)
+
+    def test_tokenize_splits_kebab_case(self):
+        """tokenize_for_bm25 should split kebab-case words."""
+        from rag_system.search.bm25_search import tokenize_for_bm25
+
+        result = tokenize_for_bm25("get-user-name data-processing")
+
+        self.assertIn('get', result)
+        self.assertIn('user', result)
+        self.assertIn('name', result)
+        self.assertIn('data', result)
+        self.assertIn('processing', result)
+
+    def test_tokenize_with_stemming(self):
+        """tokenize_for_bm25 should apply stemming when enabled."""
+        from rag_system.search.bm25_search import tokenize_for_bm25
+
+        result = tokenize_for_bm25("running cats programming", stem=True)
+
+        self.assertIn('run', result)
+        self.assertIn('cat', result)
+        self.assertIn('program', result)
+
+    def test_tokenize_without_stemming(self):
+        """tokenize_for_bm25 should preserve word forms when stemming disabled."""
+        from rag_system.search.bm25_search import tokenize_for_bm25
+
+        result = tokenize_for_bm25("running cats programming", stem=False)
+
+        self.assertIn('running', result)
+        self.assertIn('cats', result)
+        self.assertIn('programming', result)
 
 
 class TestBM25Scoring(unittest.TestCase):
@@ -247,6 +365,7 @@ class TestBatchQueries(unittest.TestCase):
 
             self.assertIn(self.chunk1_id, result)
             self.assertIn(self.chunk2_id, result)
+            # Terms are stemmed by default but "python" and "java" don't change
             self.assertIn('python', result[self.chunk1_id])
             self.assertIn('java', result[self.chunk2_id])
         finally:
@@ -269,10 +388,11 @@ class TestBatchQueries(unittest.TestCase):
 
         conn = get_connection(self.temp_path)
         try:
-            result = get_term_doc_frequencies_batch(conn, ['python', 'programming', 'nonexistent'])
+            # Terms are stemmed: "programming" -> "program"
+            result = get_term_doc_frequencies_batch(conn, ['python', 'program', 'nonexistent'])
 
             self.assertEqual(result['python'], 1)
-            self.assertEqual(result['programming'], 2)
+            self.assertEqual(result['program'], 2)  # stemmed from "programming"
             self.assertEqual(result['nonexistent'], 0)
         finally:
             conn.close()
@@ -352,14 +472,14 @@ class TestIncrementalIndex(unittest.TestCase):
         # Re-index with different content
         self.bm25_index.index_chunk(self.chunk1_id, 'updated python content')
 
-        # Verify new terms
+        # Verify new terms (stemmed: "updated" -> "updat")
         conn = get_connection(self.temp_path)
         terms = get_doc_terms(conn, self.chunk1_id)
         conn.close()
 
         self.assertIn('python', terms)
-        self.assertIn('updated', terms)
-        self.assertNotIn('initial', terms)
+        self.assertIn('updat', terms)  # stemmed from "updated"
+        self.assertNotIn('initi', terms)  # stemmed from "initial"
 
     def test_remove_chunk(self):
         """remove_chunk should remove chunk from index."""
@@ -444,6 +564,213 @@ class TestBM25SearchBatchPerformance(unittest.TestCase):
         # Should get results
         self.assertGreater(len(results), 0)
         self.assertLessEqual(len(results), 10)
+
+
+class TestBM25SearchWithStemming(unittest.TestCase):
+    """Test BM25 search with stemming enabled."""
+
+    def setUp(self):
+        """Create temporary database with test data."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page, insert_chunk
+        init_db(self.temp_path)
+
+        conn = get_connection(self.temp_path)
+        page_id = insert_page(conn, url='http://test.com', title='Test',
+                             raw_html='', parsed_text='', content_hash='abc')
+        # Use words with different forms
+        self.chunk1_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=0, content='running quickly through forests',
+                                      heading_path='')
+        self.chunk2_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=1, content='she runs fast in the forest',
+                                      heading_path='')
+        self.chunk3_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=2, content='database connections available',
+                                      heading_path='')
+        conn.close()
+
+        # Build index with stemming
+        from rag_system.search.bm25_search import BM25Index
+        index = BM25Index(self.temp_path, use_stemming=True)
+        index.build()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_stemming_matches_word_variants(self):
+        """Search should match different word forms via stemming."""
+        from rag_system.search.bm25_search import BM25Search
+
+        searcher = BM25Search(self.temp_path)
+        # Search for "run" should match "running" and "runs"
+        results = searcher.search('run', top_k=10, stem=True)
+
+        chunk_ids = [r[0] for r in results]
+        self.assertIn(self.chunk1_id, chunk_ids)  # has "running"
+        self.assertIn(self.chunk2_id, chunk_ids)  # has "runs"
+        self.assertNotIn(self.chunk3_id, chunk_ids)  # no run-related words
+
+    def test_stemming_matches_plural_singular(self):
+        """Search should match singular and plural forms."""
+        from rag_system.search.bm25_search import BM25Search
+
+        searcher = BM25Search(self.temp_path)
+        # Search for "forest" should match "forests" and "forest"
+        results = searcher.search('forest', top_k=10, stem=True)
+
+        chunk_ids = [r[0] for r in results]
+        self.assertIn(self.chunk1_id, chunk_ids)  # has "forests"
+        self.assertIn(self.chunk2_id, chunk_ids)  # has "forest"
+
+
+class TestBM25SearchWithQueryExpansion(unittest.TestCase):
+    """Test BM25 search with query expansion."""
+
+    def setUp(self):
+        """Create temporary database with test data."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page, insert_chunk
+        init_db(self.temp_path)
+
+        conn = get_connection(self.temp_path)
+        page_id = insert_page(conn, url='http://test.com', title='Test',
+                             raw_html='', parsed_text='', content_hash='abc')
+        self.chunk1_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=0, content='configure the system settings',
+                                      heading_path='')
+        self.chunk2_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=1, content='setup guide for new users',
+                                      heading_path='')
+        self.chunk3_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=2, content='database optimization tips',
+                                      heading_path='')
+        conn.close()
+
+        # Build index with stemming
+        from rag_system.search.bm25_search import BM25Index
+        index = BM25Index(self.temp_path, use_stemming=True)
+        index.build()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_search_with_query_expander(self):
+        """Search with query expansion should find more results via synonyms."""
+        from rag_system.search.bm25_search import BM25Search
+        from rag_system.query.expander import QueryExpander
+
+        expander = QueryExpander()
+        searcher = BM25Search(self.temp_path, query_expander=expander)
+
+        # Search for "configure" - expander should also try "setup"
+        results = searcher.search('configure', top_k=10, expand_query=True, stem=True)
+
+        chunk_ids = [r[0] for r in results]
+        # Should find chunk1 (has "configure") and chunk2 (has "setup" which is synonym)
+        self.assertIn(self.chunk1_id, chunk_ids)
+        self.assertIn(self.chunk2_id, chunk_ids)
+
+    def test_search_without_query_expander(self):
+        """Search without expander should only match exact terms."""
+        from rag_system.search.bm25_search import BM25Search
+
+        searcher = BM25Search(self.temp_path)
+
+        # Search for "configure" without expansion - should only match chunk1
+        results = searcher.search('configure', top_k=10, expand_query=False, stem=True)
+
+        chunk_ids = [r[0] for r in results]
+        self.assertIn(self.chunk1_id, chunk_ids)
+        # chunk2 with "setup" should NOT be found without expansion
+        self.assertNotIn(self.chunk2_id, chunk_ids)
+
+    def test_expansion_takes_max_score(self):
+        """Query expansion should use max score when chunk matches multiple queries."""
+        from rag_system.search.bm25_search import BM25Search
+        from rag_system.query.expander import QueryExpander
+
+        expander = QueryExpander()
+        searcher = BM25Search(self.temp_path, query_expander=expander)
+
+        # Search with expansion
+        results = searcher.search('configure', top_k=10, expand_query=True, stem=True)
+
+        # Verify we get results (not duplicates)
+        chunk_ids = [r[0] for r in results]
+        self.assertEqual(len(chunk_ids), len(set(chunk_ids)))  # No duplicates
+
+
+class TestBM25IndexWithStemming(unittest.TestCase):
+    """Test BM25 index with stemming configuration."""
+
+    def setUp(self):
+        """Create temporary database."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_index_with_stemming_stores_stems(self):
+        """BM25Index with stemming should store stemmed terms."""
+        from rag_system.search.bm25_search import BM25Index
+        from rag_system.database import get_connection, insert_page, insert_chunk, get_doc_terms
+
+        conn = get_connection(self.temp_path)
+        page_id = insert_page(conn, url='http://test.com', title='Test',
+                             raw_html='', parsed_text='', content_hash='abc')
+        chunk_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                               chunk_index=0, content='running programs quickly',
+                               heading_path='')
+        conn.close()
+
+        index = BM25Index(self.temp_path, use_stemming=True)
+        index.build()
+
+        conn = get_connection(self.temp_path)
+        terms = get_doc_terms(conn, chunk_id)
+        conn.close()
+
+        # Should have stemmed versions
+        self.assertIn('run', terms)  # stemmed from "running"
+        self.assertIn('program', terms)  # stemmed from "programs"
+        self.assertIn('quickli', terms)  # stemmed from "quickly"
+
+    def test_index_without_stemming_stores_original(self):
+        """BM25Index without stemming should store original terms."""
+        from rag_system.search.bm25_search import BM25Index
+        from rag_system.database import get_connection, insert_page, insert_chunk, get_doc_terms
+
+        conn = get_connection(self.temp_path)
+        page_id = insert_page(conn, url='http://test.com', title='Test',
+                             raw_html='', parsed_text='', content_hash='abc')
+        chunk_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                               chunk_index=0, content='running programs quickly',
+                               heading_path='')
+        conn.close()
+
+        index = BM25Index(self.temp_path, use_stemming=False)
+        index.build()
+
+        conn = get_connection(self.temp_path)
+        terms = get_doc_terms(conn, chunk_id)
+        conn.close()
+
+        # Should have original forms
+        self.assertIn('running', terms)
+        self.assertIn('programs', terms)
+        self.assertIn('quickly', terms)
 
 
 if __name__ == '__main__':
