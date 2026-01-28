@@ -369,8 +369,8 @@ class RAGSystem:
 
         top_k = top_k or config.TOP_K_FINAL
 
-        # Generate query hash for caching
-        query_hash = hashlib.md5(question.lower().strip().encode()).hexdigest()
+        # Generate query hash for caching (SHA256 for FIPS compliance)
+        query_hash = hashlib.sha256(question.lower().strip().encode()).hexdigest()
 
         # Check query result cache first
         cache_key = f"{query_hash}:{top_k}"
