@@ -487,16 +487,31 @@ class RAGSystem:
         # Calculate confidence
         metrics = self.confidence_analyzer.analyze(question, chunks)
 
-        # Build context and generate answer
+        # Build context and generate answer with grounding safeguards
         generation_start = time.time()
+        citations_valid = True
+        valid_citations = []
+        invalid_citations = []
+        used_fallback = False
+
         if chunks and self.chat_client:
-            context = self.context_builder.build_context(chunks)
-            answer_result = self.answer_generator.generate_with_confidence(
-                question, context, metrics['overall'], query_type
+            # Use grounded generation with citation validation
+            answer_result = self.answer_generator.generate_grounded(
+                question, chunks, confidence=metrics['overall']
             )
             answer = answer_result['answer']
-            if answer_result.get('disclaimer'):
-                answer = f"{answer}\n\n{answer_result['disclaimer']}"
+            citations_valid = answer_result.get('citations_valid', True)
+            valid_citations = answer_result.get('valid_citations', [])
+            invalid_citations = answer_result.get('invalid_citations', [])
+            used_fallback = answer_result.get('used_fallback', False)
+
+            # Log warning if citations were fabricated
+            if not citations_valid:
+                logger.warning(
+                    f"Answer contained {len(invalid_citations)} fabricated citations: "
+                    f"{invalid_citations}"
+                )
+
             timing_metrics['generation_time'] = time.time() - generation_start
         else:
             answer = "No relevant information found." if not chunks else \
@@ -552,7 +567,11 @@ class RAGSystem:
             'confidence': metrics['overall'],
             'metrics': metrics,
             'timing': timing_metrics,
-            'cache_hit': False
+            'cache_hit': False,
+            'citations_valid': citations_valid,
+            'valid_citations': valid_citations,
+            'invalid_citations': invalid_citations,
+            'used_fallback': used_fallback
         }
 
         # Log query timing (WARNING if >2s, INFO otherwise)
