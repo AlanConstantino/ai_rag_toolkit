@@ -969,7 +969,11 @@ class Crawler:
                 pages_crawled += 1
                 self.stats.record_success()
 
-                logger.info(f"Crawled ({pages_crawled}/{self.max_pages}): {url}")
+                logger.debug(f"Crawled ({pages_crawled}/{self.max_pages}): {url}")
+
+                # Log progress at INFO level every 25 pages
+                if pages_crawled % 25 == 0:
+                    logger.info(f"Crawl progress: {pages_crawled}/{self.max_pages} pages")
 
                 # Extract and queue new links
                 links = extract_links(html, url)

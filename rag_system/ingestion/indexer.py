@@ -113,12 +113,12 @@ class Indexer:
             if existing:
                 # Check if content changed
                 if existing.get('content_hash') == content_hash:
-                    logger.info(f"Skipping unchanged page: {url}")
+                    logger.debug(f"Skipping unchanged page: {url}")
                     return None
 
                 # Content changed - perform incremental update
                 page_id = existing['id']
-                logger.info(f"Content changed for page: {url} - re-indexing")
+                logger.debug(f"Content changed for page: {url} - re-indexing")
 
                 # Delete old data (terms must be deleted before chunks due to foreign key)
                 delete_doc_terms_by_page(conn, page_id)
@@ -129,7 +129,7 @@ class Indexer:
             else:
                 # New page - insert it
                 page_id = insert_page(conn, url, title, html, markdown, content_hash)
-                logger.info(f"Indexed new page: {url} (id={page_id})")
+                logger.debug(f"Indexed new page: {url} (id={page_id})")
 
             # Create chunks from Markdown (heading structure is unambiguous in MD)
             chunk_result = chunk_markdown(
@@ -170,7 +170,7 @@ class Indexer:
                 )
                 small_chunk_ids.append(chunk_id)
 
-            logger.info(f"Created {len(large_chunk_ids)} large chunks, {len(small_chunk_ids)} small chunks")
+            logger.debug(f"Created {len(large_chunk_ids)} large chunks, {len(small_chunk_ids)} small chunks")
 
             # Generate embeddings if vector client available
             # Uses contextual retrieval: embeds chunk with page title and heading path
@@ -387,6 +387,10 @@ class Indexer:
                     except Exception as e:
                         logger.error(f"Error indexing {page_data.get('url')}: {e}")
                         errors += 1
+
+                    # Log progress at INFO level every 10 pages
+                    if pages_crawled % 10 == 0:
+                        logger.info(f"Index progress: {pages_indexed} indexed, {pages_skipped} skipped, {errors} errors")
 
                     # Update session stats periodically
                     if pages_crawled % 10 == 0:
