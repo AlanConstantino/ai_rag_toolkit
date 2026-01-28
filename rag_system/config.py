@@ -172,6 +172,15 @@ ENTITY_EXTRACTION_ENABLED: bool = os.environ.get(
 ).lower() in ('true', '1', 'yes')
 
 # =============================================================================
+# Page Summarization Settings
+# =============================================================================
+
+# Enable page summarization (used by summarize-pages command)
+PAGE_SUMMARIZATION_ENABLED: bool = os.environ.get(
+    'RAG_PAGE_SUMMARIZATION_ENABLED', 'true'
+).lower() in ('true', '1', 'yes')
+
+# =============================================================================
 # Embedding Settings
 # =============================================================================
 

@@ -187,6 +187,24 @@ def create_parser() -> argparse.ArgumentParser:
         help='Output results as JSON'
     )
 
+    # Summarize pages command
+    summarize_pages_parser = subparsers.add_parser(
+        'summarize-pages',
+        help='Generate summaries for pages (post-processing step)'
+    )
+    summarize_pages_parser.add_argument(
+        '--page-id', type=int,
+        help='Only summarize a specific page ID'
+    )
+    summarize_pages_parser.add_argument(
+        '--force', action='store_true',
+        help='Regenerate summaries even for pages that have them'
+    )
+    summarize_pages_parser.add_argument(
+        '--json', action='store_true',
+        help='Output results as JSON'
+    )
+
     # Stats command
     subparsers.add_parser('stats', help='Show system statistics')
 
@@ -1119,6 +1137,33 @@ def main() -> None:
                     print(f"Pages processed: {stats['pages_processed']}")
                     print(f"Entities extracted: {stats['entities_extracted']}")
                     print(f"Relationships extracted: {stats['relationships_extracted']}")
+                    if stats['errors'] > 0:
+                        print(f"Errors: {stats['errors']}")
+
+        elif args.command == 'summarize-pages':
+            if not rag.chat_client:
+                print("Error: No chat client configured.")
+                print("Set OPENAI_API_KEY or configure RAG_CHAT_API_ENDPOINT")
+                import sys
+                sys.exit(1)
+
+            from rag_system.ingestion.indexer import Indexer
+            import json as json_module
+
+            print("Generating page summaries...")
+            indexer = Indexer(args.db, chat_client=rag.chat_client)
+            stats = indexer.summarize_pages(page_id=args.page_id, force=args.force)
+
+            if args.json:
+                print(json_module.dumps(stats, indent=2))
+            else:
+                if stats.get('error'):
+                    print(f"Error: {stats['error']}")
+                else:
+                    print("Page Summarization Results")
+                    print("=" * 40)
+                    print(f"Pages processed: {stats['pages_processed']}")
+                    print(f"Summaries generated: {stats['summaries_generated']}")
                     if stats['errors'] > 0:
                         print(f"Errors: {stats['errors']}")
 
