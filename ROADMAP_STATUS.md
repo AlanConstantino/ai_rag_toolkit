@@ -8,25 +8,24 @@ This file tracks implementation progress against the GitHub issues roadmap. Use 
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| Phase 1 | **COMPLETE** | Robustness & Error Handling |
-| Phase 2 | **COMPLETE** | Performance & Observability |
-| Phase 3 | **NOT STARTED** | Feature Completeness (Knowledge Graph, Summarization) |
-| Phase 4 | **PARTIAL** | Documentation & Deployment |
+| Phase 1 | ✅ **COMPLETE** | Robustness & Error Handling |
+| Phase 2 | ✅ **COMPLETE** | Performance & Observability |
+| Phase 3 | ✅ **COMPLETE** | Feature Completeness (Knowledge Graph, Summarization) |
+| Phase 4 | 🟡 **PARTIAL** | Documentation & Deployment |
 
 ## Current State
 
-The RAG system is **production-ready for basic use cases**:
-- Crawling, chunking, and indexing works
+The RAG system is **production-ready**:
+- Crawling, chunking, and indexing works (with resume capability)
 - Hybrid search (BM25 + vector) works
 - Query expansion and answer generation works
 - OpenAI integration works out of the box
 - BM25-only mode works without any AI/API dependencies
-
-**What's NOT wired up yet:**
-- Entity extraction exists but isn't called during indexing
-- Page/system/global summarization exists but isn't called
-- Knowledge graph exists but isn't used in answer generation
-- Grounding safeguards (citation validation) not implemented
+- Entity extraction wired into indexer pipeline
+- Page/system/global summarization runs automatically
+- Knowledge graph context enhances answer generation
+- Grounding safeguards validate citations to prevent hallucination
+- Contextual embeddings (chunk + title + heading) improve retrieval
 
 ## Phase Details
 
@@ -50,28 +49,29 @@ All issues #20-#24 are closed:
 - [x] #23 - Query result caching (LRU + TTL)
 - [x] #24 - Testing improvements (E2E, benchmarks)
 
-### Phase 3: Feature Completeness (NOT STARTED)
+### Phase 3: Feature Completeness (COMPLETE)
 
-Issues #25-#29 are all open:
-- [ ] #25 - Wire entity extractor into indexer pipeline
-- [ ] #26 - Wire page summarizer into indexer pipeline
-- [ ] #27 - Generate system and global summaries automatically
-- [ ] #28 - Add knowledge graph context to answer generation
-- [ ] #29 - Add missing CLI commands
+All issues #25-#29 and #49 are closed:
+- [x] #25 - Wire entity extractor into indexer pipeline (PR #74)
+- [x] #26 - Wire page summarizer into indexer pipeline (PR #75)
+- [x] #27 - Generate system and global summaries automatically (PR #76)
+- [x] #28 - Add knowledge graph context to answer generation (PR #77)
+- [x] #29 - Add missing CLI commands (PR #78)
+- [x] #49 - Grounding safeguards to prevent hallucination (PR #72)
 
-**CLI Commands Status:**
+**CLI Commands (All Implemented):**
 | Command | Status | Notes |
 |---------|--------|-------|
-| `rebuild-index` | EXISTS | Rebuilds BM25 index |
-| `cache stats/clear` | EXISTS | Query cache management |
-| `rebuild-summaries` | MISSING | |
-| `export-graph` | MISSING | Export knowledge graph as JSON |
-| `validate` | MISSING | Validate database integrity |
+| `rebuild-index` | ✅ EXISTS | Rebuilds BM25 index |
+| `cache stats/clear` | ✅ EXISTS | Query cache management |
+| `rebuild-summaries` | ✅ EXISTS | Regenerate page/system/global summaries |
+| `export-graph` | ✅ EXISTS | Export knowledge graph as JSON |
+| `validate` | ✅ EXISTS | Validate database integrity |
 
 ### Phase 4: Documentation & Deployment (PARTIAL)
 
 Issues #30-#33:
-- [x] #30 - Type hints in config.py - **ALREADY DONE, can close**
+- [x] #30 - Type hints in config.py (already complete)
 - [ ] #31 - Split utils.py into focused modules
 - [ ] #32 - Deployment artifacts (partial - see below)
 - [ ] #33 - Documentation
@@ -79,26 +79,50 @@ Issues #30-#33:
 **Deployment Artifacts Status:**
 | Artifact | Status |
 |----------|--------|
-| `.env.example` | EXISTS |
-| GitHub Actions | EXISTS (claude.yml, claude-code-review.yml) |
-| `Dockerfile` | MISSING |
-| `docker-compose.yml` | MISSING |
-| `Makefile` | MISSING |
-| `/docs` directory | MISSING |
+| `.env.example` | ✅ EXISTS |
+| GitHub Actions | ✅ EXISTS (claude.yml, claude-code-review.yml) |
+| `Dockerfile` | ❌ MISSING |
+| `docker-compose.yml` | ❌ MISSING |
+| `Makefile` | ❌ MISSING |
+| `/docs` directory | ❌ MISSING |
 
 ### Standalone Issues
 
-- [ ] #49 - Grounding safeguards to prevent hallucination
-- [x] #50 - Crawler resume capability (CLOSED)
+- [x] #49 - Grounding safeguards to prevent hallucination (PR #72)
+- [x] #50 - Crawler resume capability
 
-## Recent Changes (2026-01-28)
+## Version History
 
-- Merged `feature/contextual-retrieval` - adds contextual embeddings (chunk + title + heading path)
-- Merged `fix/md5-to-sha256-fips-compliance` - FIPS compliance for hashing
-- Added `--force` flag to `backfill` command for embedding regeneration
-- Added `scripts/regenerate-embeddings.sh` convenience script
+### v1.2.0 (2026-01-28) - Feature Complete Release
 
-## Quick Reference: What Works Today
+Phase 3 completion with full knowledge graph and summarization pipeline:
+
+- **Entity Extraction Pipeline** - Entities extracted during indexing and stored in knowledge graph
+- **Page Summarization** - Automatic summary generation for each indexed page
+- **System/Global Summaries** - High-level summaries across the entire corpus
+- **Knowledge Graph Context** - Entity relationships enhance answer generation
+- **Grounding Safeguards** - Citation validation prevents hallucination
+- **New CLI Commands** - `rebuild-summaries`, `export-graph`, `validate`
+- **Performance Improvements** - Batch embedding queries (50-70% faster)
+- **BM25 Improvements** - Porter stemmer, query expansion, better tokenization
+- **Source Citations** - Answers include page titles and URLs
+- **Embedding Retry/Resume** - Rate limit handling with automatic resume
+- **Contextual Embeddings** - Chunk + title + heading path for better retrieval
+- **FIPS Compliance** - SHA256 replaces MD5 for hashing
+
+### v1.1.0 (2026-01-24)
+
+- BM25/AI decoupling - run without OpenAI
+- Crawler resume capability
+- Query respects RAG_AI_ENABLED flag
+
+### v1.0.0 (2026-01-22)
+
+- Initial release with Phase 1 & 2 complete
+- Hybrid search (BM25 + vector)
+- HTTP Basic Auth support
+
+## Quick Reference
 
 ```bash
 # Crawl a site
@@ -110,11 +134,20 @@ python -m rag_system.main query "How do I configure X?"
 # Query without AI (BM25 only)
 RAG_AI_ENABLED=false python -m rag_system.main query "configure timeout"
 
-# Or use pure BM25 search
+# Pure BM25 search
 python -m rag_system.main bm25 "configure timeout"
 
 # Regenerate embeddings with contextual retrieval
 python -m rag_system.main backfill --force
+
+# Rebuild summaries
+python -m rag_system.main rebuild-summaries
+
+# Export knowledge graph
+python -m rag_system.main export-graph --output graph.json
+
+# Validate database
+python -m rag_system.main validate
 
 # Health check
 python -m rag_system.main health
@@ -123,11 +156,9 @@ python -m rag_system.main health
 python -m rag_system.main stats
 ```
 
-## Next Steps (Suggested Priority)
+## Next Steps
 
-1. Close #30 (already done)
-2. Update #32 to mark completed items
-3. Implement #49 (grounding safeguards) - high value, prevents hallucination
-4. Implement #25-#28 (wire up entity extraction, summarization, knowledge graph)
-5. Implement remaining CLI commands (#29)
-6. Add deployment artifacts (#32) and docs (#33)
+1. Close issues #30 (already done - verify and close)
+2. Implement #31 - Split utils.py into focused modules
+3. Implement #32 - Deployment artifacts (Dockerfile, docker-compose, Makefile)
+4. Implement #33 - Documentation (/docs directory)
