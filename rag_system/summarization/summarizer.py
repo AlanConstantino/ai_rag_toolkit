@@ -307,3 +307,145 @@ class SummarizationPipeline:
             Global summary string.
         """
         return self.global_summarizer.summarize(systems)
+
+    def detect_systems_from_urls(self) -> Dict[str, List[int]]:
+        """Detect systems based on URL patterns.
+
+        Groups pages by their first path segment to identify distinct
+        documentation systems/sections.
+
+        Returns:
+            Dict mapping system names to lists of page IDs.
+        """
+        from urllib.parse import urlparse
+
+        conn = get_connection(self.db_path)
+        try:
+            pages = get_all_pages(conn)
+            systems: Dict[str, List[int]] = {}
+
+            for page in pages:
+                url = page.get('url', '')
+                if not url:
+                    continue
+
+                parsed = urlparse(url)
+                path_parts = [p for p in parsed.path.split('/') if p]
+
+                # Use first meaningful path segment as system name
+                if path_parts:
+                    # Skip common prefixes like 'docs', 'api', 'en'
+                    system_name = path_parts[0]
+                    if system_name in ('docs', 'api', 'en', 'latest', 'stable'):
+                        system_name = path_parts[1] if len(path_parts) > 1 else parsed.netloc
+                else:
+                    # No path - use domain as system name
+                    system_name = parsed.netloc
+
+                # Clean up the system name
+                system_name = system_name.replace('-', ' ').replace('_', ' ').title()
+
+                if system_name not in systems:
+                    systems[system_name] = []
+                systems[system_name].append(page['id'])
+
+            return systems
+        finally:
+            conn.close()
+
+    def rebuild_all_summaries(self) -> Dict[str, Any]:
+        """Rebuild all summaries: page, system, and global.
+
+        This is the main entry point for the rebuild-summaries command.
+
+        Returns:
+            Dict with statistics about the rebuild operation.
+        """
+        from rag_system.database import (
+            insert_system, update_system_summary, get_system_by_name,
+            set_global_summary
+        )
+
+        stats = {
+            'pages_summarized': 0,
+            'systems_created': 0,
+            'systems_summarized': 0,
+            'global_summary_generated': False,
+            'errors': []
+        }
+
+        conn = get_connection(self.db_path)
+        try:
+            # Step 1: Summarize all pages that don't have summaries
+            logger.info("Step 1: Summarizing pages...")
+            pages = get_all_pages(conn)
+            for page in pages:
+                if not page.get('summary'):
+                    text = page.get('parsed_text', '')
+                    if text:
+                        try:
+                            summary = self.page_summarizer.summarize(text)
+                            if summary:
+                                update_page_summary(conn, page['id'], summary)
+                                stats['pages_summarized'] += 1
+                        except Exception as e:
+                            stats['errors'].append(f"Page {page['id']}: {e}")
+
+            # Step 2: Detect and create systems
+            logger.info("Step 2: Detecting systems from URLs...")
+            detected_systems = self.detect_systems_from_urls()
+            logger.info(f"Detected {len(detected_systems)} systems")
+
+            # Step 3: Create/update systems and generate summaries
+            logger.info("Step 3: Generating system summaries...")
+            system_summaries = []
+
+            for system_name, page_ids in detected_systems.items():
+                try:
+                    # Check if system exists
+                    existing = get_system_by_name(conn, system_name)
+                    if existing:
+                        system_id = existing['id']
+                    else:
+                        # Create new system with empty description and summary
+                        system_id = insert_system(
+                            conn, system_name,
+                            description='',
+                            summary=''
+                        )
+                        stats['systems_created'] += 1
+
+                    # Link pages to system
+                    for page_id in page_ids:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO page_systems (page_id, system_id) VALUES (?, ?)",
+                            (page_id, system_id)
+                        )
+                    conn.commit()
+
+                    # Generate system summary
+                    summary = self.summarize_system(system_name, page_ids)
+                    if summary:
+                        update_system_summary(conn, system_id, summary)
+                        stats['systems_summarized'] += 1
+                        system_summaries.append({
+                            'name': system_name,
+                            'summary': summary
+                        })
+                except Exception as e:
+                    stats['errors'].append(f"System {system_name}: {e}")
+
+            # Step 4: Generate global summary
+            logger.info("Step 4: Generating global summary...")
+            if system_summaries:
+                try:
+                    global_summary = self.generate_global_summary(system_summaries)
+                    if global_summary:
+                        set_global_summary(conn, global_summary)
+                        stats['global_summary_generated'] = True
+                except Exception as e:
+                    stats['errors'].append(f"Global summary: {e}")
+
+            return stats
+        finally:
+            conn.close()
