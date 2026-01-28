@@ -622,7 +622,7 @@ class TestHTTPCache(unittest.TestCase):
 
         cache = HTTPCache(self.temp_dir)
         url = 'https://example.com/corrupted'
-        url_hash = hashlib.md5(url.encode()).hexdigest()
+        url_hash = hashlib.sha256(url.encode()).hexdigest()
         cache_path = os.path.join(self.temp_dir, f"{url_hash}.json")
 
         # Write corrupted JSON
@@ -644,7 +644,7 @@ class TestHTTPCache(unittest.TestCase):
 
         cache = HTTPCache(self.temp_dir)
         url = 'https://example.com/empty'
-        url_hash = hashlib.md5(url.encode()).hexdigest()
+        url_hash = hashlib.sha256(url.encode()).hexdigest()
         cache_path = os.path.join(self.temp_dir, f"{url_hash}.json")
 
         # Write empty file
@@ -665,7 +665,7 @@ class TestHTTPCache(unittest.TestCase):
 
         cache = HTTPCache(self.temp_dir)
         url = 'https://example.com/incomplete'
-        url_hash = hashlib.md5(url.encode()).hexdigest()
+        url_hash = hashlib.sha256(url.encode()).hexdigest()
         cache_path = os.path.join(self.temp_dir, f"{url_hash}.json")
 
         # Write JSON with missing required fields

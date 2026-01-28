@@ -242,7 +242,7 @@ class VectorSearch:
         """Compute a hash of the current database content.
 
         Returns:
-            MD5 hash of chunk IDs and embedding update timestamps.
+            SHA256 hash of chunk IDs and embedding update timestamps.
         """
         conn = get_connection(self.db_path)
         try:
@@ -259,7 +259,7 @@ class VectorSearch:
 
             # Create hash from content signature
             signature = f"{count}:{max_id}:{self.db_path}"
-            return hashlib.md5(signature.encode()).hexdigest()
+            return hashlib.sha256(signature.encode()).hexdigest()
         finally:
             conn.close()
 
