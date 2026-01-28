@@ -527,6 +527,13 @@ class RAGSystem:
             'cache_hit': False
         }
 
+        # Log query timing (WARNING if >2s, INFO otherwise)
+        total_time = timing_metrics.get('total_time', 0)
+        if total_time > 2.0:
+            logger.warning(f"Query completed in {total_time:.2f}s (slow)")
+        else:
+            logger.info(f"Query completed in {total_time:.2f}s")
+
         # Store result in cache
         if use_cache and _query_cache is not None:
             _query_cache.put(cache_key, result)
