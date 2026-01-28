@@ -8,6 +8,8 @@ import re
 from html.parser import HTMLParser
 from typing import Dict, List, Optional, Any
 
+from rag_system import config
+
 
 # =============================================================================
 # HTML Text Extractor
@@ -40,18 +42,21 @@ class TextExtractor(HTMLParser):
         self.remove_footer = remove_footer
         self.current_tag_stack: List[str] = []
 
+    def _should_ignore_tag(self, tag: str) -> bool:
+        """Check if a tag should be ignored based on settings."""
+        if tag in self.IGNORE_TAGS:
+            return True
+        if self.remove_nav and tag in ('nav', 'header'):
+            return True
+        if self.remove_footer and tag == 'footer':
+            return True
+        return False
+
     def handle_starttag(self, tag: str, attrs: List[tuple]) -> None:
         tag = tag.lower()
         self.current_tag_stack.append(tag)
 
-        # Check if we should ignore this tag's content
-        if tag in self.IGNORE_TAGS:
-            self.ignore_depth += 1
-        elif tag == 'nav' and self.remove_nav:
-            self.ignore_depth += 1
-        elif tag == 'footer' and self.remove_footer:
-            self.ignore_depth += 1
-        elif tag == 'header' and self.remove_nav:
+        if self._should_ignore_tag(tag):
             self.ignore_depth += 1
 
         # Add spacing for block elements
@@ -65,14 +70,7 @@ class TextExtractor(HTMLParser):
         if self.current_tag_stack and self.current_tag_stack[-1] == tag:
             self.current_tag_stack.pop()
 
-        # Decrease ignore depth if we're leaving an ignored tag
-        if tag in self.IGNORE_TAGS:
-            self.ignore_depth = max(0, self.ignore_depth - 1)
-        elif tag == 'nav' and self.remove_nav:
-            self.ignore_depth = max(0, self.ignore_depth - 1)
-        elif tag == 'footer' and self.remove_footer:
-            self.ignore_depth = max(0, self.ignore_depth - 1)
-        elif tag == 'header' and self.remove_nav:
+        if self._should_ignore_tag(tag):
             self.ignore_depth = max(0, self.ignore_depth - 1)
 
         # Add spacing after block elements
@@ -198,8 +196,192 @@ class MetadataExtractor(HTMLParser):
 
 
 # =============================================================================
+# Main Content Detector
+# =============================================================================
+
+def _matches_selector(selector: str, tag: str, attrs: List[tuple]) -> bool:
+    """Check if a tag matches a selector pattern.
+
+    Args:
+        selector: Selector string (e.g., 'main', 'role=main', 'class=content')
+        tag: HTML tag name
+        attrs: List of tag attributes
+
+    Returns:
+        True if the tag matches the selector.
+    """
+    tag = tag.lower()
+    attrs_dict = dict(attrs)
+
+    # Simple tag name match
+    if selector == tag:
+        return True
+
+    # Attribute-based matches
+    if '=' not in selector:
+        return False
+
+    attr_name, expected_value = selector.split('=', 1)
+
+    if attr_name == 'role':
+        return attrs_dict.get('role', '').lower() == expected_value
+    elif attr_name == 'class':
+        classes = attrs_dict.get('class', '').lower().split()
+        return expected_value in classes
+    elif attr_name == 'id':
+        return attrs_dict.get('id', '').lower() == expected_value
+
+    return False
+
+
+class MainContentFinder(HTMLParser):
+    """HTML parser that identifies the main content element type.
+
+    Searches for semantic HTML5 tags (<main>, <article>), ARIA roles,
+    and common class/id patterns that indicate main content areas.
+    """
+
+    def __init__(self, selectors: Optional[List[str]] = None):
+        super().__init__()
+        self.selectors = selectors or config.MAIN_CONTENT_SELECTORS
+        self.found_element: Optional[str] = None
+
+    def handle_starttag(self, tag: str, attrs: List[tuple]) -> None:
+        if self.found_element:
+            return
+
+        for selector in self.selectors:
+            if _matches_selector(selector, tag, attrs):
+                self.found_element = selector
+                return
+
+
+class MainContentExtractor(HTMLParser):
+    """HTML parser that extracts content from the main content area only.
+
+    Finds the main content element and extracts text from within it,
+    excluding navigation, sidebars, and footers.
+    """
+
+    IGNORE_TAGS = {'script', 'style', 'noscript', 'template', 'nav', 'footer', 'header', 'aside'}
+    BLOCK_TAGS = {
+        'p', 'div', 'section', 'article', 'main',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+        'table', 'tr', 'th', 'td',
+        'blockquote', 'pre', 'code',
+        'br', 'hr'
+    }
+
+    def __init__(self, target_selector: str):
+        super().__init__()
+        self.target_selector = target_selector
+        self.text_parts: List[str] = []
+        self.in_main_content = False
+        self.main_content_depth = 0
+        self.ignore_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: List[tuple]) -> None:
+        tag_lower = tag.lower()
+
+        # Check if entering the main content element
+        if not self.in_main_content and _matches_selector(self.target_selector, tag, attrs):
+            self.in_main_content = True
+            self.main_content_depth = 1
+            return
+
+        if self.in_main_content:
+            self.main_content_depth += 1
+
+            if tag_lower in self.IGNORE_TAGS:
+                self.ignore_depth += 1
+
+            # Add spacing for block elements
+            if tag_lower in self.BLOCK_TAGS and self.text_parts:
+                self.text_parts.append('\n')
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_lower = tag.lower()
+
+        if self.in_main_content:
+            if tag_lower in self.IGNORE_TAGS:
+                self.ignore_depth = max(0, self.ignore_depth - 1)
+
+            # Add spacing after block elements
+            if tag_lower in self.BLOCK_TAGS:
+                self.text_parts.append('\n')
+
+            self.main_content_depth -= 1
+            if self.main_content_depth <= 0:
+                self.in_main_content = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_main_content and self.ignore_depth == 0:
+            text = data.strip()
+            if text:
+                self.text_parts.append(text)
+
+    def get_text(self) -> str:
+        """Get the extracted main content text, normalized."""
+        text = ' '.join(self.text_parts)
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        return text.strip()
+
+
+# =============================================================================
 # Public Functions
 # =============================================================================
+
+def find_main_content_element(html: str) -> Optional[str]:
+    """Find the type of main content element in HTML.
+
+    Searches for semantic HTML5 tags, ARIA roles, and common class/id patterns.
+
+    Args:
+        html: HTML content.
+
+    Returns:
+        Selector string (e.g., 'main', 'article', 'class=main-content') or None.
+    """
+    parser = MainContentFinder()
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+    return parser.found_element
+
+
+def extract_main_content(html: str) -> str:
+    """Extract text from the main content area of HTML.
+
+    Identifies the main content element (using <main>, <article>, role='main',
+    or common class/id patterns) and extracts text only from within it.
+    Falls back to full content extraction if no main content area is found.
+
+    Args:
+        html: HTML content.
+
+    Returns:
+        Extracted main content text.
+    """
+    # First, find the main content element
+    main_element = find_main_content_element(html)
+
+    if main_element:
+        # Extract content from within the main element
+        parser = MainContentExtractor(main_element)
+        try:
+            parser.feed(html)
+        except Exception:
+            pass
+        content = parser.get_text()
+        if content:
+            return content
+
+    # Fall back to full content extraction (minus nav/footer)
+    return extract_text(html, remove_nav=True, remove_footer=True)
+
 
 def extract_title(html: str) -> str:
     """Extract the page title from HTML.

@@ -203,5 +203,248 @@ class TestBM25Search(unittest.TestCase):
         self.assertLessEqual(len(results), 1)
 
 
+class TestBatchQueries(unittest.TestCase):
+    """Test batch query functions for BM25."""
+
+    def setUp(self):
+        """Create temporary database with test data."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page, insert_chunk
+        init_db(self.temp_path)
+
+        conn = get_connection(self.temp_path)
+        page_id = insert_page(conn, url='http://test.com', title='Test',
+                             raw_html='', parsed_text='', content_hash='abc')
+        self.chunk1_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=0, content='python programming',
+                                      heading_path='')
+        self.chunk2_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=1, content='java programming',
+                                      heading_path='')
+        self.chunk3_id = insert_chunk(conn, page_id=page_id, chunk_type='small',
+                                      chunk_index=2, content='database design',
+                                      heading_path='')
+        conn.close()
+
+        # Build index
+        from rag_system.search.bm25_search import BM25Index
+        index = BM25Index(self.temp_path)
+        index.build()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_get_doc_terms_batch(self):
+        """get_doc_terms_batch should fetch multiple chunks efficiently."""
+        from rag_system.database import get_connection, get_doc_terms_batch
+
+        conn = get_connection(self.temp_path)
+        try:
+            result = get_doc_terms_batch(conn, [self.chunk1_id, self.chunk2_id])
+
+            self.assertIn(self.chunk1_id, result)
+            self.assertIn(self.chunk2_id, result)
+            self.assertIn('python', result[self.chunk1_id])
+            self.assertIn('java', result[self.chunk2_id])
+        finally:
+            conn.close()
+
+    def test_get_doc_terms_batch_empty(self):
+        """get_doc_terms_batch should handle empty input."""
+        from rag_system.database import get_connection, get_doc_terms_batch
+
+        conn = get_connection(self.temp_path)
+        try:
+            result = get_doc_terms_batch(conn, [])
+            self.assertEqual(result, {})
+        finally:
+            conn.close()
+
+    def test_get_term_doc_frequencies_batch(self):
+        """get_term_doc_frequencies_batch should fetch multiple terms."""
+        from rag_system.database import get_connection, get_term_doc_frequencies_batch
+
+        conn = get_connection(self.temp_path)
+        try:
+            result = get_term_doc_frequencies_batch(conn, ['python', 'programming', 'nonexistent'])
+
+            self.assertEqual(result['python'], 1)
+            self.assertEqual(result['programming'], 2)
+            self.assertEqual(result['nonexistent'], 0)
+        finally:
+            conn.close()
+
+    def test_batch_search_same_results_as_individual(self):
+        """Batch queries should produce same results as individual queries."""
+        from rag_system.search.bm25_search import BM25Search
+        from rag_system.database import get_connection, get_doc_terms, get_doc_terms_batch
+
+        conn = get_connection(self.temp_path)
+        try:
+            # Get terms individually
+            terms1 = get_doc_terms(conn, self.chunk1_id)
+            terms2 = get_doc_terms(conn, self.chunk2_id)
+
+            # Get terms in batch
+            batch_result = get_doc_terms_batch(conn, [self.chunk1_id, self.chunk2_id])
+
+            self.assertEqual(terms1, batch_result[self.chunk1_id])
+            self.assertEqual(terms2, batch_result[self.chunk2_id])
+        finally:
+            conn.close()
+
+
+class TestIncrementalIndex(unittest.TestCase):
+    """Test incremental BM25 index updates."""
+
+    def setUp(self):
+        """Create temporary database."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page, insert_chunk
+        init_db(self.temp_path)
+
+        conn = get_connection(self.temp_path)
+        self.page_id = insert_page(conn, url='http://test.com', title='Test',
+                                   raw_html='', parsed_text='', content_hash='abc')
+        self.chunk1_id = insert_chunk(conn, page_id=self.page_id, chunk_type='small',
+                                      chunk_index=0, content='initial content',
+                                      heading_path='')
+        conn.close()
+
+        # Build initial index
+        from rag_system.search.bm25_search import BM25Index
+        self.bm25_index = BM25Index(self.temp_path)
+        self.bm25_index.build()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_index_chunk_adds_new_chunk(self):
+        """index_chunk should add a new chunk to the index."""
+        from rag_system.database import get_connection, insert_chunk, get_doc_terms
+
+        conn = get_connection(self.temp_path)
+        new_chunk_id = insert_chunk(conn, page_id=self.page_id, chunk_type='small',
+                                    chunk_index=1, content='new python content',
+                                    heading_path='')
+        conn.close()
+
+        self.bm25_index.index_chunk(new_chunk_id, 'new python content')
+
+        # Verify terms were indexed
+        conn = get_connection(self.temp_path)
+        terms = get_doc_terms(conn, new_chunk_id)
+        conn.close()
+
+        self.assertIn('python', terms)
+        self.assertIn('content', terms)
+
+    def test_index_chunk_updates_existing(self):
+        """index_chunk should update an existing chunk."""
+        from rag_system.database import get_connection, get_doc_terms
+
+        # Re-index with different content
+        self.bm25_index.index_chunk(self.chunk1_id, 'updated python content')
+
+        # Verify new terms
+        conn = get_connection(self.temp_path)
+        terms = get_doc_terms(conn, self.chunk1_id)
+        conn.close()
+
+        self.assertIn('python', terms)
+        self.assertIn('updated', terms)
+        self.assertNotIn('initial', terms)
+
+    def test_remove_chunk(self):
+        """remove_chunk should remove chunk from index."""
+        from rag_system.database import get_connection, get_doc_terms
+
+        self.bm25_index.remove_chunk(self.chunk1_id)
+
+        # Verify terms were removed
+        conn = get_connection(self.temp_path)
+        terms = get_doc_terms(conn, self.chunk1_id)
+        conn.close()
+
+        self.assertEqual(len(terms), 0)
+
+    def test_index_chunks_batch(self):
+        """index_chunks_batch should index multiple chunks efficiently."""
+        from rag_system.database import get_connection, insert_chunk, get_doc_terms, get_corpus_stats
+
+        conn = get_connection(self.temp_path)
+        chunk2_id = insert_chunk(conn, page_id=self.page_id, chunk_type='small',
+                                 chunk_index=1, content='', heading_path='')
+        chunk3_id = insert_chunk(conn, page_id=self.page_id, chunk_type='small',
+                                 chunk_index=2, content='', heading_path='')
+        conn.close()
+
+        # Batch index
+        self.bm25_index.index_chunks_batch([
+            (chunk2_id, 'python programming'),
+            (chunk3_id, 'java programming')
+        ])
+
+        # Verify terms
+        conn = get_connection(self.temp_path)
+        terms2 = get_doc_terms(conn, chunk2_id)
+        terms3 = get_doc_terms(conn, chunk3_id)
+        stats = get_corpus_stats(conn)
+        conn.close()
+
+        self.assertIn('python', terms2)
+        self.assertIn('java', terms3)
+        # Should have 3 total docs now (1 original + 2 new)
+        self.assertEqual(stats['total_docs'], 3)
+
+
+class TestBM25SearchBatchPerformance(unittest.TestCase):
+    """Test that batch queries are used in search."""
+
+    def setUp(self):
+        """Create temporary database with many chunks."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page, insert_chunk
+        init_db(self.temp_path)
+
+        conn = get_connection(self.temp_path)
+        page_id = insert_page(conn, url='http://test.com', title='Test',
+                             raw_html='', parsed_text='', content_hash='abc')
+
+        # Create many chunks
+        for i in range(20):
+            insert_chunk(conn, page_id=page_id, chunk_type='small',
+                        chunk_index=i, content=f'chunk {i} programming content test',
+                        heading_path='')
+        conn.close()
+
+        from rag_system.search.bm25_search import BM25Index
+        index = BM25Index(self.temp_path)
+        index.build()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_search_many_chunks(self):
+        """Search should work efficiently with many matching chunks."""
+        from rag_system.search.bm25_search import BM25Search
+
+        searcher = BM25Search(self.temp_path)
+        results = searcher.search('programming', top_k=10)
+
+        # Should get results
+        self.assertGreater(len(results), 0)
+        self.assertLessEqual(len(results), 10)
+
+
 if __name__ == '__main__':
     unittest.main()

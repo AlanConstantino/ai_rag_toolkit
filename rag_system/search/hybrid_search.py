@@ -3,7 +3,7 @@
 Combines vector and BM25 search with score normalization.
 """
 
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 
 from rag_system import config
 from rag_system.utils import get_logger
@@ -91,21 +91,31 @@ class HybridSearch:
         self.vector_weight = vector_weight if vector_weight is not None else config.VECTOR_WEIGHT
         self.bm25_weight = bm25_weight if bm25_weight is not None else config.BM25_WEIGHT
 
-    def search(self, query_embedding: List[float], query_text: str,
+    def search(self, query_embedding: Optional[List[float]], query_text: str,
                top_k: int = 20) -> List[Tuple[int, float]]:
         """Perform hybrid search.
 
+        BM25 is always the foundation. Vector search enhances results when
+        an embedding is provided.
+
         Args:
-            query_embedding: Query embedding vector.
+            query_embedding: Query embedding vector. If None, returns BM25 only.
             query_text: Query text for BM25.
             top_k: Number of results from each search method.
 
         Returns:
             Merged list of (chunk_id, score) sorted descending.
         """
-        # Get results from both methods
-        vector_results = self.vector_search.search(query_embedding, top_k=top_k)
+        # BM25 is always the foundation
         bm25_results = self.bm25_search.search(query_text, top_k=top_k)
+
+        # If no embedding provided, return BM25 results only
+        if query_embedding is None:
+            logger.debug(f"BM25-only search: {len(bm25_results)} results")
+            return bm25_results
+
+        # Get vector results and merge with BM25
+        vector_results = self.vector_search.search(query_embedding, top_k=top_k)
 
         logger.debug(f"Vector results: {len(vector_results)}, BM25 results: {len(bm25_results)}")
 

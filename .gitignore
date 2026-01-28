@@ -26,3 +26,12 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# HTTP cache for development
+.http_cache/
+
+# Mac OS metadata
+._*
+
+# Project description (not for commit)
+PROJECT.md

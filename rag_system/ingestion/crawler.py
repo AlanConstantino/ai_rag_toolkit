@@ -4,21 +4,380 @@ Provides BFS web crawling with robots.txt respect, rate limiting,
 and domain filtering. Uses only Python standard library.
 """
 
+import functools
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
-from typing import Dict, Generator, List, Optional, Set
+from typing import Dict, Generator, List, Optional, Set, Tuple
 import hashlib
 import os
 import json
 from pathlib import Path
 
 from rag_system.utils import get_logger
+from rag_system import config
+from rag_system.shutdown import is_shutdown_requested
 
 logger = get_logger(__name__)
+
+
+# =============================================================================
+# Custom Exceptions
+# =============================================================================
+
+class CrawlerError(Exception):
+    """Base exception for crawler operations."""
+    pass
+
+
+class FetchError(CrawlerError):
+    """Exception raised when fetching a URL fails."""
+
+    def __init__(self, url: str, message: str, status_code: Optional[int] = None):
+        self.url = url
+        self.status_code = status_code
+        super().__init__(f"Failed to fetch {url}: {message}")
+
+
+class CacheError(CrawlerError):
+    """Exception raised for cache-related errors."""
+
+    def __init__(self, url: str, message: str):
+        self.url = url
+        super().__init__(f"Cache error for {url}: {message}")
+
+
+class URLValidationError(CrawlerError):
+    """Exception raised when URL validation fails."""
+
+    def __init__(self, url: str, reason: str):
+        self.url = url
+        self.reason = reason
+        super().__init__(f"Invalid URL {url}: {reason}")
+
+
+# =============================================================================
+# Crawl Statistics
+# =============================================================================
+
+class CrawlStats:
+    """Statistics from a crawl operation."""
+
+    def __init__(self):
+        self.pages_succeeded: int = 0
+        self.pages_failed: int = 0
+        self.pages_skipped: int = 0
+        self.errors: List[Dict[str, str]] = []
+
+    def record_success(self) -> None:
+        """Record a successful page fetch."""
+        self.pages_succeeded += 1
+
+    def record_failure(self, url: str, error: str) -> None:
+        """Record a failed page fetch."""
+        self.pages_failed += 1
+        self.errors.append({'url': url, 'error': error})
+
+    def record_skip(self) -> None:
+        """Record a skipped page."""
+        self.pages_skipped += 1
+
+    def to_dict(self) -> Dict:
+        """Convert stats to dictionary."""
+        return {
+            'pages_succeeded': self.pages_succeeded,
+            'pages_failed': self.pages_failed,
+            'pages_skipped': self.pages_skipped,
+            'total_errors': len(self.errors),
+            'errors': self.errors
+        }
+
+
+# =============================================================================
+# Retry Decorator
+# =============================================================================
+
+def retry_on_error(
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    exponential_backoff: bool = True,
+    retryable_exceptions: Tuple = (urllib.error.URLError,)
+):
+    """Decorator to retry operations on transient errors.
+
+    Args:
+        max_retries: Maximum number of retry attempts.
+        base_delay: Base delay between retries in seconds.
+        exponential_backoff: If True, use exponential backoff for delays.
+        retryable_exceptions: Tuple of exception types to retry on.
+
+    Returns:
+        Decorated function.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except urllib.error.HTTPError as e:
+                    # Only retry on retryable status codes
+                    if e.code not in config.CRAWLER_RETRY_STATUS_CODES:
+                        raise FetchError(
+                            url=getattr(e, 'url', str(args[1] if len(args) > 1 else 'unknown')),
+                            message=f"HTTP {e.code}: {e.reason}",
+                            status_code=e.code
+                        )
+                    last_exception = e
+                    if attempt >= max_retries:
+                        raise FetchError(
+                            url=getattr(e, 'url', str(args[1] if len(args) > 1 else 'unknown')),
+                            message=f"HTTP {e.code} after {max_retries} retries",
+                            status_code=e.code
+                        )
+                except retryable_exceptions as e:
+                    last_exception = e
+                    if attempt >= max_retries:
+                        url = str(args[1]) if len(args) > 1 else 'unknown'
+                        raise FetchError(
+                            url=url,
+                            message=f"{type(e).__name__}: {e}"
+                        )
+
+                # Calculate delay with exponential backoff
+                if exponential_backoff:
+                    delay = base_delay * (2 ** attempt)
+                else:
+                    delay = base_delay
+
+                logger.warning(
+                    f"Retry {attempt + 1}/{max_retries} after error: {last_exception}, "
+                    f"waiting {delay}s"
+                )
+                time.sleep(delay)
+
+            # Should not reach here, but just in case
+            raise last_exception
+
+        return wrapper
+    return decorator
+
+
+# =============================================================================
+# URL Validation
+# =============================================================================
+
+# Private IP ranges that should be blocked to prevent SSRF
+PRIVATE_IP_PREFIXES = (
+    '10.',
+    '172.16.', '172.17.', '172.18.', '172.19.',
+    '172.20.', '172.21.', '172.22.', '172.23.',
+    '172.24.', '172.25.', '172.26.', '172.27.',
+    '172.28.', '172.29.', '172.30.', '172.31.',
+    '192.168.',
+    '127.',
+    '0.',
+    '169.254.',  # Link-local
+)
+
+# Blocked hostnames that could be used for SSRF
+BLOCKED_HOSTNAMES = {
+    'localhost',
+    'localhost.localdomain',
+    'metadata.google.internal',  # GCP metadata
+    'metadata',  # Generic cloud metadata
+}
+
+
+def validate_url(url: str, allow_private: bool = False) -> Tuple[bool, Optional[str]]:
+    """Validate a URL for safe crawling.
+
+    Checks for:
+    - No spaces or control characters
+    - Valid URL scheme (http/https only)
+    - Non-private IP addresses (unless allow_private is True)
+    - Non-blocked hostnames
+
+    Args:
+        url: URL to validate.
+        allow_private: If True, allow private/internal addresses.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    # Check for spaces and control characters (ASCII 0-31)
+    # These cause urllib to raise InvalidURL
+    for char in url:
+        if char == ' ':
+            return False, "URL contains space"
+        if ord(char) < 32:
+            return False, f"URL contains control character (ord={ord(char)})"
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as e:
+        return False, f"Failed to parse URL: {e}"
+
+    # Check scheme
+    if parsed.scheme not in ('http', 'https'):
+        return False, f"Invalid scheme: {parsed.scheme}"
+
+    # Check for empty host
+    if not parsed.netloc:
+        return False, "Empty host"
+
+    hostname = parsed.netloc.split(':')[0].lower()
+
+    if not allow_private:
+        # Check blocked hostnames only when private addresses are not allowed
+        if hostname in BLOCKED_HOSTNAMES:
+            return False, f"Blocked hostname: {hostname}"
+        # Check if hostname is an IP address
+        try:
+            # Try to resolve and check for private IP
+            ip_addr = socket.gethostbyname(hostname)
+            for prefix in PRIVATE_IP_PREFIXES:
+                if ip_addr.startswith(prefix):
+                    return False, f"Private IP address: {ip_addr}"
+        except socket.gaierror:
+            # Could not resolve - hostname doesn't exist
+            # This is fine for validation, let the fetch fail naturally
+            pass
+        except socket.herror:
+            pass
+
+    return True, None
+
+
+def validate_url_or_raise(url: str, allow_private: bool = False) -> None:
+    """Validate a URL and raise URLValidationError if invalid.
+
+    Args:
+        url: URL to validate.
+        allow_private: If True, allow private/internal addresses.
+
+    Raises:
+        URLValidationError: If URL validation fails.
+    """
+    is_valid, error = validate_url(url, allow_private)
+    if not is_valid:
+        raise URLValidationError(url, error)
+
+
+# =============================================================================
+# HTTP Cache
+# =============================================================================
+
+class HTTPCache:
+    """Manages HTTP response caching."""
+
+    def __init__(self, cache_dir: str):
+        """Initialize the HTTP cache.
+
+        Args:
+            cache_dir: Directory to store cache files.
+        """
+        self.cache_dir = cache_dir
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        logger.info(f"HTTP cache enabled: {cache_dir}")
+
+    def _get_cache_path(self, url: str) -> str:
+        """Get cache file path for a URL.
+
+        Args:
+            url: URL to get cache path for.
+
+        Returns:
+            Path to cache file.
+        """
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        return os.path.join(self.cache_dir, f"{url_hash}.json")
+
+    def get(self, url: str) -> Optional[Tuple[str, int]]:
+        """Get cached response for a URL.
+
+        Args:
+            url: URL to get cached response for.
+
+        Returns:
+            Tuple of (content, status_code) if cached and valid, None otherwise.
+            Corrupted or invalid cache files are cleaned up and None is returned.
+        """
+        cache_path = self._get_cache_path(url)
+
+        if not os.path.exists(cache_path):
+            return None
+
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Validate JSON before parsing
+            if not content.strip():
+                logger.warning(f"Empty cache file for {url}, removing")
+                self._remove_cache_file(cache_path)
+                return None
+
+            cached = json.loads(content)
+
+            # Validate required fields
+            if not isinstance(cached, dict):
+                logger.warning(f"Cache file for {url} is not a JSON object, removing")
+                self._remove_cache_file(cache_path)
+                return None
+
+            if 'content' not in cached or 'status' not in cached:
+                logger.warning(f"Cache file for {url} missing required fields, removing")
+                self._remove_cache_file(cache_path)
+                return None
+
+            logger.info(f"Cache hit: {url}")
+            return cached['content'], cached['status']
+
+        except json.JSONDecodeError as e:
+            # Cache file is corrupted - remove it and return None
+            logger.warning(f"Corrupted cache file for {url}: {e}")
+            self._remove_cache_file(cache_path)
+            return None
+
+        except OSError as e:
+            logger.warning(f"Error reading cache file for {url}: {e}")
+            return None
+
+    def _remove_cache_file(self, cache_path: str) -> None:
+        """Remove a cache file safely.
+
+        Args:
+            cache_path: Path to cache file to remove.
+        """
+        try:
+            os.remove(cache_path)
+            logger.info(f"Removed invalid cache file: {cache_path}")
+        except OSError:
+            pass
+
+    def put(self, url: str, content: str, status: int) -> None:
+        """Store response in cache.
+
+        Args:
+            url: URL that was fetched.
+            content: Response content.
+            status: HTTP status code.
+        """
+        cache_path = self._get_cache_path(url)
+
+        try:
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump({'url': url, 'content': content, 'status': status}, f)
+            logger.info(f"Cached: {url}")
+        except OSError as e:
+            logger.warning(f"Failed to cache {url}: {e}")
 
 
 # =============================================================================
@@ -188,8 +547,9 @@ def extract_links(html: str, base_url: str) -> List[str]:
     parser = LinkExtractor(base_url)
     try:
         parser.feed(html)
-    except Exception:
-        pass  # Ignore malformed HTML
+    except (ValueError, AssertionError):
+        # HTMLParser can raise these on malformed HTML
+        pass
     return parser.links
 
 
@@ -298,7 +658,9 @@ class Crawler:
                  included_paths: Optional[List[str]] = None,
                  max_pages: int = 1000, delay: float = 1.0,
                  cache_dir: Optional[str] = None,
-                 ignore_robots: bool = False):
+                 ignore_robots: bool = False,
+                 allow_private_urls: bool = False,
+                 basic_auth_token: Optional[str] = None):
         """Initialize the crawler.
 
         Args:
@@ -313,6 +675,10 @@ class Crawler:
             cache_dir: Optional directory for HTTP response caching.
                       If None, caching is disabled.
             ignore_robots: If True, ignore robots.txt restrictions.
+            allow_private_urls: If True, allow crawling private/internal URLs.
+            basic_auth_token: Optional Base64-encoded token for HTTP Basic Auth.
+                            Format: base64(username:password). When provided,
+                            sends 'Authorization: Basic <token>' header with requests.
         """
         self.start_url = normalize_url(start_url)
         self.allowed_domains = allowed_domains
@@ -320,19 +686,25 @@ class Crawler:
         self.included_paths = included_paths
         self.max_pages = max_pages
         self.delay = delay
-        self.cache_dir = cache_dir
         self.ignore_robots = ignore_robots
+        self.allow_private_urls = allow_private_urls
+        self.basic_auth_token = basic_auth_token
 
-        if self.cache_dir:
-            Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
-            logger.info(f"HTTP cache enabled: {self.cache_dir}")
+        # Set up HTTP cache if directory specified
+        self.cache: Optional[HTTPCache] = None
+        if cache_dir:
+            self.cache = HTTPCache(cache_dir)
 
         if self.ignore_robots:
             logger.info("Ignoring robots.txt restrictions")
 
+        if self.basic_auth_token:
+            logger.info("HTTP Basic Auth enabled for crawling")
+
         self.visited: Set[str] = set()
         self.queue: List[str] = [self.start_url]
         self.robots_parser: Optional[RobotsParser] = None
+        self.stats: CrawlStats = CrawlStats()
 
     def _fetch_robots_txt(self) -> Optional[str]:
         """Fetch and parse robots.txt for the start domain.
@@ -344,31 +716,27 @@ class Crawler:
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
 
         try:
-            request = urllib.request.Request(
-                robots_url,
-                headers={'User-Agent': self.USER_AGENT}
-            )
+            headers = {'User-Agent': self.USER_AGENT}
+
+            # Add Basic Auth header if token is configured
+            if self.basic_auth_token:
+                headers['Authorization'] = f'Basic {self.basic_auth_token}'
+
+            request = urllib.request.Request(robots_url, headers=headers)
             with urllib.request.urlopen(request, timeout=10) as response:
                 return response.read().decode('utf-8', errors='ignore')
-        except Exception:
+        except urllib.error.HTTPError as e:
+            logger.debug(f"robots.txt fetch failed with HTTP {e.code}")
+            return None
+        except urllib.error.URLError as e:
+            logger.debug(f"robots.txt fetch failed: {e.reason}")
+            return None
+        except OSError as e:
+            logger.debug(f"robots.txt fetch failed with OS error: {e}")
             return None
 
-    def _get_cache_path(self, url: str) -> str:
-        """Get cache file path for a URL.
-
-        Args:
-            url: URL to get cache path for.
-
-        Returns:
-            Path to cache file.
-        """
-        url_hash = hashlib.md5(url.encode()).hexdigest()
-        return os.path.join(self.cache_dir, f"{url_hash}.json")
-
-    def _fetch_url(self, url: str) -> tuple:
-        """Fetch a URL and return its content.
-
-        Checks cache first if caching is enabled.
+    def _fetch_url_from_network(self, url: str) -> Tuple[str, int]:
+        """Fetch a URL directly from the network.
 
         Args:
             url: URL to fetch.
@@ -378,36 +746,117 @@ class Crawler:
 
         Raises:
             urllib.error.HTTPError: If the request fails.
+            urllib.error.URLError: If the connection fails.
         """
-        # Check cache first
-        if self.cache_dir:
-            cache_path = self._get_cache_path(url)
-            if os.path.exists(cache_path):
-                logger.info(f"Cache hit: {url}")
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    cached = json.load(f)
-                    return cached['content'], cached['status']
+        headers = {
+            'User-Agent': self.USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml',
+        }
 
-        # Fetch from network
-        request = urllib.request.Request(
-            url,
-            headers={
-                'User-Agent': self.USER_AGENT,
-                'Accept': 'text/html,application/xhtml+xml',
-            }
-        )
+        # Add Basic Auth header if token is configured
+        if self.basic_auth_token:
+            headers['Authorization'] = f'Basic {self.basic_auth_token}'
+
+        request = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(request, timeout=30) as response:
-            content = response.read().decode('utf-8', errors='ignore')
+            content = response.read().decode('utf-8', errors='replace')
             status = response.status
-
-        # Cache the response
-        if self.cache_dir:
-            cache_path = self._get_cache_path(url)
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump({'url': url, 'content': content, 'status': status}, f)
-            logger.info(f"Cached: {url}")
-
         return content, status
+
+    def _fetch_url(self, url: str) -> Tuple[str, int]:
+        """Fetch a URL and return its content.
+
+        Checks cache first if caching is enabled. Retries on transient errors
+        (5xx status codes and timeouts) with exponential backoff.
+
+        Args:
+            url: URL to fetch.
+
+        Returns:
+            Tuple of (content, status_code).
+
+        Raises:
+            FetchError: If the request fails after all retries.
+            URLValidationError: If the URL fails validation.
+        """
+        # Validate URL before fetching
+        validate_url_or_raise(url, allow_private=self.allow_private_urls)
+
+        # Check cache first
+        if self.cache:
+            cached = self.cache.get(url)
+            if cached is not None:
+                return cached
+
+        # Fetch from network with retry logic
+        max_retries = config.CRAWLER_MAX_RETRIES
+        base_delay = config.CRAWLER_RETRY_DELAY
+        retry_codes = config.CRAWLER_RETRY_STATUS_CODES
+
+        last_error: Optional[Exception] = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                content, status = self._fetch_url_from_network(url)
+
+                # Cache the response
+                if self.cache:
+                    self.cache.put(url, content, status)
+
+                return content, status
+
+            except urllib.error.HTTPError as e:
+                last_error = e
+                # Only retry on configured status codes
+                should_retry = e.code in retry_codes and attempt < max_retries
+                if not should_retry:
+                    raise FetchError(
+                        url=url,
+                        message=f"HTTP {e.code}: {e.reason}",
+                        status_code=e.code
+                    )
+
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"HTTP {e.code} for {url}, retrying in {delay}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
+
+            except urllib.error.URLError as e:
+                last_error = e
+                # Retry on timeout and connection errors
+                if attempt >= max_retries:
+                    raise FetchError(
+                        url=url,
+                        message=f"Connection error: {e.reason}"
+                    )
+
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"URL error for {url}: {e.reason}, retrying in {delay}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
+
+            except OSError as e:
+                last_error = e
+                # Retry on OS-level errors (socket errors, etc.)
+                if attempt >= max_retries:
+                    raise FetchError(
+                        url=url,
+                        message=f"OS error: {e}"
+                    )
+
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"OS error for {url}: {e}, retrying in {delay}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
+
+        # Should not reach here, but just in case
+        raise FetchError(url=url, message=f"Max retries exceeded: {last_error}")
 
     def _is_html_content(self, url: str) -> bool:
         """Check if URL likely points to HTML content.
@@ -473,12 +922,18 @@ class Crawler:
 
         return True
 
-    def crawl(self) -> Generator[Dict, None, None]:
+    def crawl(self) -> Generator[Dict, None, CrawlStats]:
         """Crawl the website starting from the start URL.
 
         Yields:
             Dict with 'url', 'html', and 'status_code' for each page.
+
+        Returns:
+            CrawlStats object with crawl statistics (access via get_stats()).
         """
+        # Reset stats for new crawl
+        self.stats = CrawlStats()
+
         # Fetch robots.txt first (unless ignoring)
         if not self.ignore_robots:
             robots_txt = self._fetch_robots_txt()
@@ -491,6 +946,11 @@ class Crawler:
         pages_crawled = 0
 
         while self.queue and pages_crawled < self.max_pages:
+            # Check for shutdown request
+            if is_shutdown_requested():
+                logger.info("Shutdown requested, stopping crawl...")
+                break
+
             url = self.queue.pop(0)
 
             # Skip if already visited or shouldn't crawl
@@ -499,6 +959,7 @@ class Crawler:
 
             if not self._should_crawl(url):
                 self.visited.add(url)
+                self.stats.record_skip()
                 continue
 
             self.visited.add(url)
@@ -506,6 +967,7 @@ class Crawler:
             try:
                 html, status_code = self._fetch_url(url)
                 pages_crawled += 1
+                self.stats.record_success()
 
                 logger.info(f"Crawled ({pages_crawled}/{self.max_pages}): {url}")
 
@@ -525,9 +987,22 @@ class Crawler:
                 if self.delay > 0 and pages_crawled < self.max_pages:
                     time.sleep(self.delay)
 
-            except urllib.error.HTTPError as e:
-                logger.warning(f"HTTP error {e.code} for {url}")
-            except urllib.error.URLError as e:
-                logger.warning(f"URL error for {url}: {e.reason}")
-            except Exception as e:
-                logger.warning(f"Error crawling {url}: {e}")
+            except FetchError as e:
+                error_msg = str(e)
+                logger.warning(f"Fetch error for {url}: {error_msg}")
+                self.stats.record_failure(url, error_msg)
+
+            except URLValidationError as e:
+                error_msg = str(e)
+                logger.warning(f"URL validation error: {error_msg}")
+                self.stats.record_failure(url, error_msg)
+
+        return self.stats
+
+    def get_stats(self) -> CrawlStats:
+        """Get the current crawl statistics.
+
+        Returns:
+            CrawlStats object with crawl statistics.
+        """
+        return self.stats

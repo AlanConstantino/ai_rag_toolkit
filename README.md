@@ -1,104 +1,95 @@
-# Intelligent Documentation RAG System
+# AI RAG Toolkit
 
-A retrieval-augmented generation system for navigating and querying large documentation websites. Built with Python 3.6.5+ standard library only—no external dependencies.
+A documentation search system that crawls websites and lets you ask questions about them.
+
+**Works with or without AI** - use keyword search alone, or add OpenAI for smarter answers.
+
+## Quick Start
+
+```bash
+# Setup
+git clone https://github.com/AlanConstantino/ai_rag_toolkit.git
+cd ai_rag_toolkit
+./scripts/setup.sh
+
+# Add your OpenAI key (optional but recommended)
+echo 'OPENAI_API_KEY=sk-your-key' >> .env
+
+# Crawl some docs
+./scripts/crawl.sh https://docs.python.org/3/ --max-pages 50
+
+# Ask questions
+./scripts/query.sh "How do I install Python?"
+```
 
 ## Features
 
-- **Hybrid Search**: Combines BM25 lexical matching with vector similarity search
-- **Knowledge Graph**: Extracts entities and relationships from documentation
-- **Summarization Hierarchy**: Page, system, and global summaries for context
-- **Query Intelligence**: Classifies, expands, and routes queries appropriately
-- **Result Diversification**: Ensures answers draw from multiple sources
+- **Hybrid Search** - Combines keyword matching (BM25) with AI semantic search
+- **Works Offline** - Disable AI and use pure keyword search
+- **Resume Crawls** - Interrupt with Ctrl+C, resume later
+- **No Dependencies** - Pure Python 3.6+ standard library
 
-## Installation
+## Scripts
 
-No package installation required. Clone the repository and configure your API endpoints.
-
-```bash
-git clone <repository-url>
-cd ai_rag_toolkit
-```
+| Script | Purpose |
+|--------|---------|
+| `setup.sh` | First-time setup |
+| `crawl.sh` | Crawl a website |
+| `query.sh` | Ask questions (AI) |
+| `search.sh` | Keyword search (no AI) |
+| `stats.sh` | Show statistics |
+| `interactive.sh` | Chat mode |
+| `health.sh` | Check system status |
+| `rebuild-index.sh` | Fix search index |
+| `run_tests.sh` | Run tests |
 
 ## Configuration
 
-Set environment variables for your vector and chat APIs:
+Create `.env` from the example:
+```bash
+cp .env.example .env
+```
+
+Key settings:
+```bash
+OPENAI_API_KEY=sk-your-key     # For AI features
+RAG_AI_ENABLED=true            # Set false for keyword-only mode
+RAG_MAX_PAGES=1000             # Crawl limit
+```
+
+See `.env.example` for all options.
+
+## Crawling Authenticated Sites
+
+For websites that require HTTP Basic Auth:
 
 ```bash
-export RAG_VECTOR_API_ENDPOINT="https://your-vector-api.com/embed"
-export RAG_VECTOR_API_AUTH_VALUE="Bearer your-token"
-export RAG_CHAT_API_ENDPOINT="https://your-chat-api.com/complete"
-export RAG_CHAT_API_AUTH_VALUE="Bearer your-token"
+# Using username and password
+./scripts/crawl.sh https://private.example.com \
+    --basic-auth-user myuser \
+    --basic-auth-pass mypassword
+
+# Or using a pre-encoded Base64 token
+./scripts/crawl.sh https://private.example.com \
+    --basic-auth-token dXNlcm5hbWU6cGFzc3dvcmQ=
 ```
 
-Optional settings:
-- `RAG_DATABASE_PATH` - SQLite database location (default: `rag_system.db`)
-- `RAG_MAX_PAGES` - Maximum pages to crawl (default: 1000)
-- `RAG_VECTOR_WEIGHT` / `RAG_BM25_WEIGHT` - Search weights (default: 0.7/0.3)
-
-## Usage
-
-### Ingest Documentation
-
-Crawl and index a documentation website:
-
+You can also set credentials via environment variables:
 ```bash
-python -m rag_system.main ingest https://docs.example.com --max-pages 500
+RAG_BASIC_AUTH_ENABLED=true
+RAG_BASIC_AUTH_USERNAME=myuser
+RAG_BASIC_AUTH_PASSWORD=mypassword
 ```
 
-### Query the System
+## Usage Guide
 
-```bash
-python -m rag_system.main query "How do I configure timeout settings?"
-```
-
-### Interactive Mode
-
-```bash
-python -m rag_system.main interactive
-```
-
-Commands in interactive mode:
-- Type any question to query
-- `stats` - Show database statistics
-- `quit` or `exit` - Exit
-
-### View Statistics
-
-```bash
-python -m rag_system.main stats
-```
-
-## Architecture
-
-**Ingestion Pipeline:**
-```
-Website → Crawler → Parser → Chunker → Entity Extractor → Summarizer → Embedder → SQLite
-```
-
-**Query Pipeline:**
-```
-Query → Classifier → Expander → Hybrid Search → Diversifier → Reranker → Answer Generator
-```
-
-## Running Tests
-
-```bash
-# Run all tests
-python -m unittest discover -s tests -p "test_*.py"
-
-# Run specific test module
-python -m unittest tests.test_database
-
-# Run with verbose output
-python -m unittest discover -s tests -p "test_*.py" -v
-```
+See [USAGE.md](USAGE.md) for detailed instructions.
 
 ## Requirements
 
-- Python 3.6.5+ (standard library only)
-- Custom vector embedding API
-- Custom chat/LLM completion API
+- Python 3.6.5+
+- OpenAI API key (optional, for AI features)
 
 ## License
 
-See LICENSE file for details.
+See LICENSE file.

@@ -7,22 +7,73 @@ Uses only Python standard library.
 import hashlib
 import json
 import logging
+import os
 import re
+import threading
 import time
 from functools import wraps
-from typing import Any, Callable, List, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 
 # =============================================================================
 # Logging Utilities
 # =============================================================================
 
-def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
+class JSONFormatter(logging.Formatter):
+    """JSON log formatter for structured logging."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format log record as JSON.
+
+        Args:
+            record: Log record to format.
+
+        Returns:
+            JSON string.
+        """
+        log_data = {
+            'timestamp': self.formatTime(record, self.datefmt),
+            'level': record.levelname,
+            'logger': record.name,
+            'message': record.getMessage(),
+        }
+
+        # Add extra fields if present
+        if hasattr(record, 'extra_data') and record.extra_data:
+            log_data['data'] = record.extra_data
+
+        # Add exception info if present
+        if record.exc_info:
+            log_data['exception'] = self.formatException(record.exc_info)
+
+        return json.dumps(log_data)
+
+
+def get_log_level() -> int:
+    """Get the configured log level.
+
+    Returns:
+        Logging level constant.
+    """
+    level_str = os.environ.get('RAG_LOG_LEVEL', 'INFO').upper()
+    return getattr(logging, level_str, logging.INFO)
+
+
+def get_log_format() -> str:
+    """Get the configured log format.
+
+    Returns:
+        'json' or 'text'.
+    """
+    return os.environ.get('RAG_LOG_FORMAT', 'text').lower()
+
+
+def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
     """Get a configured logger.
 
     Args:
         name: Logger name (typically module name).
-        level: Logging level.
+        level: Logging level. If None, uses RAG_LOG_LEVEL env var.
 
     Returns:
         Configured logger instance.
@@ -31,14 +82,49 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
 
     if not logger.handlers:
         handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+
+        log_format = get_log_format()
+        if log_format == 'json':
+            formatter = JSONFormatter()
+        else:
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
+    if level is None:
+        level = get_log_level()
     logger.setLevel(level)
     return logger
+
+
+def log_with_context(logger: logging.Logger, level: int, message: str,
+                     **kwargs: Any) -> None:
+    """Log a message with additional context data.
+
+    For JSON format, the kwargs become structured data fields.
+    For text format, they're appended to the message.
+
+    Args:
+        logger: Logger instance.
+        level: Logging level.
+        message: Log message.
+        **kwargs: Additional context data.
+    """
+    if get_log_format() == 'json':
+        # Create a custom log record with extra data
+        record = logger.makeRecord(
+            logger.name, level, "", 0, message, (), None
+        )
+        record.extra_data = kwargs
+        logger.handle(record)
+    else:
+        # Append context to message for text format
+        if kwargs:
+            context_str = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+            message = f"{message} [{context_str}]"
+        logger.log(level, message)
 
 
 # =============================================================================
@@ -209,6 +295,168 @@ class Timer:
 
 
 # =============================================================================
+# Metrics Collection
+# =============================================================================
+
+class MetricsCollector:
+    """Collects and stores timing metrics for various operations.
+
+    Thread-safe singleton for collecting metrics across the application.
+    """
+
+    _instance: Optional['MetricsCollector'] = None
+    _lock: threading.Lock = threading.Lock()
+
+    def __new__(cls) -> 'MetricsCollector':
+        """Singleton pattern to ensure one instance."""
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
+    def __init__(self) -> None:
+        """Initialize the metrics collector."""
+        if self._initialized:
+            return
+        self._initialized = True
+        self._metrics: Dict[str, List[float]] = {}
+        self._current_query_metrics: Dict[str, float] = {}
+        self._metrics_lock = threading.Lock()
+
+    def record(self, metric_name: str, value: float) -> None:
+        """Record a metric value.
+
+        Args:
+            metric_name: Name of the metric (e.g., 'vector_api_time').
+            value: Metric value (typically time in seconds).
+        """
+        with self._metrics_lock:
+            if metric_name not in self._metrics:
+                self._metrics[metric_name] = []
+            self._metrics[metric_name].append(value)
+
+    def start_query(self) -> None:
+        """Start tracking metrics for a new query."""
+        with self._metrics_lock:
+            self._current_query_metrics = {
+                'start_time': time.time()
+            }
+
+    def record_query_metric(self, metric_name: str, value: float) -> None:
+        """Record a metric for the current query.
+
+        Args:
+            metric_name: Name of the metric.
+            value: Metric value.
+        """
+        with self._metrics_lock:
+            self._current_query_metrics[metric_name] = value
+
+    def finish_query(self) -> Dict[str, float]:
+        """Finish tracking the current query and return metrics.
+
+        Returns:
+            Dict of all metrics collected for this query.
+        """
+        with self._metrics_lock:
+            if 'start_time' in self._current_query_metrics:
+                self._current_query_metrics['total_time'] = (
+                    time.time() - self._current_query_metrics['start_time']
+                )
+            metrics = self._current_query_metrics.copy()
+            self._current_query_metrics = {}
+            return metrics
+
+    def get_current_query_metrics(self) -> Dict[str, float]:
+        """Get metrics for the current query without clearing.
+
+        Returns:
+            Dict of current query metrics.
+        """
+        with self._metrics_lock:
+            return self._current_query_metrics.copy()
+
+    def get_aggregate_metrics(self) -> Dict[str, Dict[str, float]]:
+        """Get aggregate statistics for all recorded metrics.
+
+        Returns:
+            Dict with min, max, avg, count for each metric.
+        """
+        with self._metrics_lock:
+            result = {}
+            for name, values in self._metrics.items():
+                if values:
+                    result[name] = {
+                        'count': len(values),
+                        'min': min(values),
+                        'max': max(values),
+                        'avg': sum(values) / len(values),
+                        'total': sum(values)
+                    }
+            return result
+
+    def get_all_metrics(self) -> Dict[str, List[float]]:
+        """Get all raw metric values.
+
+        Returns:
+            Dict mapping metric names to lists of values.
+        """
+        with self._metrics_lock:
+            return {k: v.copy() for k, v in self._metrics.items()}
+
+    def clear(self) -> None:
+        """Clear all collected metrics."""
+        with self._metrics_lock:
+            self._metrics.clear()
+            self._current_query_metrics.clear()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export metrics as a dictionary.
+
+        Returns:
+            Dict containing aggregate and raw metrics.
+        """
+        return {
+            'aggregate': self.get_aggregate_metrics(),
+            'raw': self.get_all_metrics()
+        }
+
+
+def get_metrics_collector() -> MetricsCollector:
+    """Get the global metrics collector instance.
+
+    Returns:
+        MetricsCollector singleton instance.
+    """
+    return MetricsCollector()
+
+
+def timed_operation(metric_name: str) -> Callable:
+    """Decorator to time a function and record the metric.
+
+    Args:
+        metric_name: Name of the metric to record.
+
+    Returns:
+        Decorated function.
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            collector = get_metrics_collector()
+            start = time.time()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                elapsed = time.time() - start
+                collector.record(metric_name, elapsed)
+                collector.record_query_metric(metric_name, elapsed)
+        return wrapper
+    return decorator
+
+
+# =============================================================================
 # Retry Utilities
 # =============================================================================
 
@@ -241,3 +489,211 @@ def retry(max_attempts: int = 3, delay: float = 1.0,
             raise last_exception
         return wrapper
     return decorator
+
+
+# =============================================================================
+# LRU Cache with TTL
+# =============================================================================
+
+class LRUCache:
+    """Thread-safe LRU cache with time-to-live (TTL) support.
+
+    Entries are evicted based on access time (LRU) and age (TTL).
+    Uses doubly linked list for O(1) LRU operations.
+    """
+
+    def __init__(self, max_size: int, ttl_seconds: int):
+        """Initialize the LRU cache.
+
+        Args:
+            max_size: Maximum number of entries to store.
+            ttl_seconds: Time-to-live in seconds for cache entries.
+        """
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        self._lock = threading.Lock()
+
+        # Storage: key -> (value, timestamp, prev_key, next_key)
+        self._cache: Dict[str, tuple] = {}
+
+        # Doubly linked list head/tail for LRU ordering
+        self._head: Optional[str] = None  # Most recently used
+        self._tail: Optional[str] = None  # Least recently used
+
+        # Statistics
+        self._hits = 0
+        self._misses = 0
+        self._evictions = 0
+
+    def _is_expired(self, timestamp: float) -> bool:
+        """Check if an entry has expired based on TTL."""
+        if self.ttl_seconds <= 0:
+            return False
+        return time.time() - timestamp > self.ttl_seconds
+
+    def _remove_from_list(self, key: str) -> None:
+        """Remove a key from the linked list (internal, assumes lock held)."""
+        if key not in self._cache:
+            return
+
+        _, _, prev_key, next_key = self._cache[key]
+
+        if prev_key is not None:
+            value, ts, pp, _ = self._cache[prev_key]
+            self._cache[prev_key] = (value, ts, pp, next_key)
+        else:
+            self._head = next_key
+
+        if next_key is not None:
+            value, ts, _, nn = self._cache[next_key]
+            self._cache[next_key] = (value, ts, prev_key, nn)
+        else:
+            self._tail = prev_key
+
+    def _add_to_head(self, key: str) -> None:
+        """Add a key to the head of the list (internal, assumes lock held)."""
+        if key not in self._cache:
+            return
+
+        value, ts, _, _ = self._cache[key]
+        old_head = self._head
+
+        self._cache[key] = (value, ts, None, old_head)
+        self._head = key
+
+        if old_head is not None:
+            value, ts, _, next_key = self._cache[old_head]
+            self._cache[old_head] = (value, ts, key, next_key)
+
+        if self._tail is None:
+            self._tail = key
+
+    def _evict_lru(self) -> None:
+        """Evict the least recently used entry (internal, assumes lock held)."""
+        if self._tail is None:
+            return
+
+        key_to_remove = self._tail
+        self._remove_from_list(key_to_remove)
+        del self._cache[key_to_remove]
+        self._evictions += 1
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get a value from the cache.
+
+        Args:
+            key: Cache key.
+
+        Returns:
+            Cached value or None if not found/expired.
+        """
+        with self._lock:
+            if key not in self._cache:
+                self._misses += 1
+                return None
+
+            value, timestamp, _, _ = self._cache[key]
+
+            # Check if expired
+            if self._is_expired(timestamp):
+                self._remove_from_list(key)
+                del self._cache[key]
+                self._misses += 1
+                return None
+
+            # Move to head (most recently used)
+            self._remove_from_list(key)
+            self._cache[key] = (value, timestamp, None, None)
+            self._add_to_head(key)
+
+            self._hits += 1
+            return value
+
+    def put(self, key: str, value: Any) -> None:
+        """Put a value in the cache.
+
+        Args:
+            key: Cache key.
+            value: Value to cache.
+        """
+        with self._lock:
+            # Update existing entry
+            if key in self._cache:
+                self._remove_from_list(key)
+
+            # Evict if at capacity
+            while len(self._cache) >= self.max_size:
+                self._evict_lru()
+
+            # Add new entry
+            self._cache[key] = (value, time.time(), None, None)
+            self._add_to_head(key)
+
+    def delete(self, key: str) -> bool:
+        """Delete an entry from the cache.
+
+        Args:
+            key: Cache key.
+
+        Returns:
+            True if the entry was found and deleted.
+        """
+        with self._lock:
+            if key not in self._cache:
+                return False
+
+            self._remove_from_list(key)
+            del self._cache[key]
+            return True
+
+    def clear(self) -> None:
+        """Clear all entries from the cache."""
+        with self._lock:
+            self._cache.clear()
+            self._head = None
+            self._tail = None
+            # Don't reset statistics on clear
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get cache statistics.
+
+        Returns:
+            Dict with hits, misses, evictions, and size.
+        """
+        with self._lock:
+            total = self._hits + self._misses
+            hit_rate = self._hits / total if total > 0 else 0.0
+            return {
+                'hits': self._hits,
+                'misses': self._misses,
+                'evictions': self._evictions,
+                'size': len(self._cache),
+                'max_size': self.max_size,
+                'ttl_seconds': self.ttl_seconds,
+                'hit_rate': round(hit_rate, 4)
+            }
+
+    def reset_stats(self) -> None:
+        """Reset cache statistics."""
+        with self._lock:
+            self._hits = 0
+            self._misses = 0
+            self._evictions = 0
+
+    def cleanup_expired(self) -> int:
+        """Remove all expired entries from the cache.
+
+        Returns:
+            Number of entries removed.
+        """
+        with self._lock:
+            keys_to_remove = []
+            for key, (_, timestamp, _, _) in self._cache.items():
+                if self._is_expired(timestamp):
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                self._remove_from_list(key)
+                del self._cache[key]
+
+            return len(keys_to_remove)

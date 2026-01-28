@@ -284,5 +284,265 @@ class TestSSLConfiguration(unittest.TestCase):
         self.assertIsNotNone(client)
 
 
+class TestCircuitBreaker(unittest.TestCase):
+    """Test circuit breaker functionality."""
+
+    def test_circuit_breaker_starts_closed(self):
+        """Circuit breaker should start in closed state."""
+        from rag_system.api_client import CircuitBreaker
+
+        cb = CircuitBreaker(failure_threshold=3, reset_timeout=1.0)
+        self.assertEqual(cb.state, CircuitBreaker.CLOSED)
+        self.assertTrue(cb.can_execute())
+
+    def test_circuit_breaker_opens_after_threshold(self):
+        """Circuit breaker should open after failure threshold."""
+        from rag_system.api_client import CircuitBreaker
+
+        cb = CircuitBreaker(failure_threshold=3, reset_timeout=60.0)
+
+        # Record failures up to threshold
+        cb.record_failure()
+        self.assertTrue(cb.can_execute())
+        cb.record_failure()
+        self.assertTrue(cb.can_execute())
+        cb.record_failure()  # Threshold reached
+
+        self.assertEqual(cb.state, CircuitBreaker.OPEN)
+        self.assertFalse(cb.can_execute())
+
+    def test_circuit_breaker_closes_on_success(self):
+        """Circuit breaker should close on success after being open."""
+        from rag_system.api_client import CircuitBreaker
+
+        cb = CircuitBreaker(failure_threshold=2, reset_timeout=0.01)
+
+        # Open the circuit
+        cb.record_failure()
+        cb.record_failure()
+        self.assertFalse(cb.can_execute())
+
+        # Wait for reset timeout
+        import time
+        time.sleep(0.02)
+
+        # Should be half-open now
+        self.assertEqual(cb.state, CircuitBreaker.HALF_OPEN)
+        self.assertTrue(cb.can_execute())
+
+        # Success should close it
+        cb.record_success()
+        self.assertEqual(cb.state, CircuitBreaker.CLOSED)
+
+    def test_circuit_breaker_reset(self):
+        """reset() should return circuit breaker to closed state."""
+        from rag_system.api_client import CircuitBreaker
+
+        cb = CircuitBreaker(failure_threshold=1)
+        cb.record_failure()
+        self.assertFalse(cb.can_execute())
+
+        cb.reset()
+        self.assertEqual(cb.state, CircuitBreaker.CLOSED)
+        self.assertTrue(cb.can_execute())
+
+    def test_success_resets_failure_count(self):
+        """Success should reset failure count."""
+        from rag_system.api_client import CircuitBreaker
+
+        cb = CircuitBreaker(failure_threshold=3)
+
+        cb.record_failure()
+        cb.record_failure()
+        cb.record_success()  # Reset failure count
+        cb.record_failure()
+        cb.record_failure()  # Still under threshold
+
+        self.assertTrue(cb.can_execute())
+
+
+class TestCircuitBreakerIntegration(unittest.TestCase):
+    """Test circuit breaker integration with API clients."""
+
+    def test_vector_client_uses_circuit_breaker(self):
+        """VectorAPIClient should respect circuit breaker."""
+        from rag_system.api_client import (
+            VectorAPIClient, CircuitBreaker, CircuitBreakerError
+        )
+        import urllib.error
+
+        # Create a custom circuit breaker with low threshold
+        cb = CircuitBreaker(failure_threshold=2, reset_timeout=60.0)
+        client = VectorAPIClient(
+            endpoint='https://api.example.com/embed',
+            auth_header='Authorization',
+            auth_value='Bearer token',
+            circuit_breaker=cb
+        )
+
+        # Force circuit to open
+        with patch('urllib.request.urlopen',
+                   side_effect=urllib.error.HTTPError('url', 500, 'Error', {}, None)):
+            try:
+                client.get_embedding('test')
+            except Exception:
+                pass
+            try:
+                client.get_embedding('test')
+            except Exception:
+                pass
+
+        # Now circuit should be open
+        self.assertFalse(cb.can_execute())
+
+        # Attempting another request should raise CircuitBreakerError
+        with self.assertRaises(CircuitBreakerError):
+            client.get_embedding('test')
+
+    def test_chat_client_uses_circuit_breaker(self):
+        """ChatAPIClient should respect circuit breaker."""
+        from rag_system.api_client import (
+            ChatAPIClient, CircuitBreaker, CircuitBreakerError
+        )
+        import urllib.error
+
+        cb = CircuitBreaker(failure_threshold=2, reset_timeout=60.0)
+        client = ChatAPIClient(
+            endpoint='https://api.example.com/chat',
+            auth_header='Authorization',
+            auth_value='Bearer token',
+            circuit_breaker=cb
+        )
+
+        # Force circuit to open
+        with patch('urllib.request.urlopen',
+                   side_effect=urllib.error.HTTPError('url', 500, 'Error', {}, None)):
+            try:
+                client.complete('test')
+            except Exception:
+                pass
+            try:
+                client.complete('test')
+            except Exception:
+                pass
+
+        # Circuit should be open
+        self.assertFalse(cb.can_execute())
+
+        with self.assertRaises(CircuitBreakerError):
+            client.complete('test')
+
+    def test_client_is_available_method(self):
+        """Clients should have is_available() method."""
+        from rag_system.api_client import VectorAPIClient, CircuitBreaker
+
+        cb = CircuitBreaker(failure_threshold=1)
+        client = VectorAPIClient(
+            endpoint='https://api.example.com/embed',
+            auth_header='Authorization',
+            auth_value='Bearer token',
+            circuit_breaker=cb
+        )
+
+        self.assertTrue(client.is_available())
+        cb.record_failure()
+        self.assertFalse(client.is_available())
+
+    def test_client_reset_circuit_breaker_method(self):
+        """Clients should have reset_circuit_breaker() method."""
+        from rag_system.api_client import ChatAPIClient, CircuitBreaker
+
+        cb = CircuitBreaker(failure_threshold=1)
+        client = ChatAPIClient(
+            endpoint='https://api.example.com/chat',
+            auth_header='Authorization',
+            auth_value='Bearer token',
+            circuit_breaker=cb
+        )
+
+        cb.record_failure()
+        self.assertFalse(client.is_available())
+
+        client.reset_circuit_breaker()
+        self.assertTrue(client.is_available())
+
+
+class TestCustomExceptions(unittest.TestCase):
+    """Test custom exception classes."""
+
+    def test_api_error_has_attributes(self):
+        """APIError should store status_code and response."""
+        from rag_system.api_client import APIError
+
+        error = APIError("Test error", status_code=500, response='{"error": "Server Error"}')
+        self.assertEqual(str(error), "Test error")
+        self.assertEqual(error.status_code, 500)
+        self.assertEqual(error.response, '{"error": "Server Error"}')
+
+    def test_circuit_breaker_error_is_api_error(self):
+        """CircuitBreakerError should be subclass of APIError."""
+        from rag_system.api_client import APIError, CircuitBreakerError
+
+        self.assertTrue(issubclass(CircuitBreakerError, APIError))
+
+    def test_timeout_error_is_api_error(self):
+        """TimeoutError should be subclass of APIError."""
+        from rag_system.api_client import APIError, TimeoutError
+
+        self.assertTrue(issubclass(TimeoutError, APIError))
+
+
+class TestRetryBehavior(unittest.TestCase):
+    """Test HTTP request retry behavior."""
+
+    def test_retries_on_server_error(self):
+        """make_http_request should retry on 5xx errors."""
+        from rag_system.api_client import make_http_request, APIError
+        import urllib.error
+
+        call_count = [0]
+
+        def mock_urlopen(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise urllib.error.HTTPError('url', 503, 'Service Unavailable', {}, None)
+            # Success on 3rd try
+            mock_response = MagicMock()
+            mock_response.read.return_value = b'{"result": "success"}'
+            mock_response.__enter__ = MagicMock(return_value=mock_response)
+            mock_response.__exit__ = MagicMock(return_value=False)
+            return mock_response
+
+        with patch('urllib.request.urlopen', side_effect=mock_urlopen):
+            with patch('time.sleep'):  # Skip actual delay
+                result = make_http_request(
+                    'https://api.example.com',
+                    {'data': 'test'},
+                    {'Content-Type': 'application/json'},
+                    max_retries=3
+                )
+
+        self.assertEqual(result['result'], 'success')
+        self.assertEqual(call_count[0], 3)
+
+    def test_raises_after_max_retries(self):
+        """make_http_request should raise after exhausting retries."""
+        from rag_system.api_client import make_http_request, APIError
+        import urllib.error
+
+        with patch('urllib.request.urlopen',
+                   side_effect=urllib.error.HTTPError('url', 503, 'Error', {}, None)):
+            with patch('time.sleep'):
+                with self.assertRaises(APIError) as ctx:
+                    make_http_request(
+                        'https://api.example.com',
+                        {'data': 'test'},
+                        {'Content-Type': 'application/json'},
+                        max_retries=2
+                    )
+
+                self.assertEqual(ctx.exception.status_code, 503)
+
+
 if __name__ == '__main__':
     unittest.main()

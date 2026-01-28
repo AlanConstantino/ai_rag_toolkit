@@ -35,7 +35,8 @@ class TestDatabaseInit(unittest.TestCase):
             'pages', 'chunks', 'entities', 'relationships',
             'chunk_entities', 'systems', 'page_systems', 'global_summary',
             'doc_terms', 'corpus_stats', 'term_doc_frequencies',
-            'query_cache', 'query_log'
+            'query_cache', 'query_log',
+            'crawl_sessions', 'crawl_queue'
         }
 
         self.assertTrue(expected_tables.issubset(tables),
@@ -565,6 +566,688 @@ class TestQueryCacheOperations(unittest.TestCase):
         logs = get_query_logs(conn, limit=10)
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]['query'], 'test query')
+        conn.close()
+
+
+class TestDatabaseErrorHandling(unittest.TestCase):
+    """Test database error handling functionality."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_insert_duplicate_page_raises_integrity_error(self):
+        """insert_page should raise IntegrityConstraintError for duplicate URL."""
+        from rag_system.database import (
+            get_connection, insert_page, IntegrityConstraintError
+        )
+        conn = get_connection(self.temp_path)
+
+        # Insert first page
+        insert_page(conn, url='https://example.com/page1', title='Test',
+                   raw_html='', parsed_text='', content_hash='abc')
+
+        # Try to insert duplicate
+        with self.assertRaises(IntegrityConstraintError):
+            insert_page(conn, url='https://example.com/page1', title='Test 2',
+                       raw_html='', parsed_text='', content_hash='def')
+
+        conn.close()
+
+    def test_insert_chunk_with_invalid_page_id_raises_error(self):
+        """insert_chunk should raise IntegrityConstraintError for invalid page_id."""
+        from rag_system.database import (
+            get_connection, insert_chunk, IntegrityConstraintError
+        )
+        conn = get_connection(self.temp_path)
+
+        with self.assertRaises(IntegrityConstraintError):
+            insert_chunk(conn, page_id=99999, chunk_type='large',
+                        chunk_index=0, content='Test', heading_path='A')
+
+        conn.close()
+
+    def test_transaction_context_manager_commits_on_success(self):
+        """transaction() should commit when block completes successfully."""
+        from rag_system.database import (
+            get_connection, insert_page, get_page_by_url, transaction
+        )
+        conn = get_connection(self.temp_path)
+
+        with transaction(conn):
+            insert_page(conn, url='https://example.com/tx', title='TX Test',
+                       raw_html='', parsed_text='', content_hash='abc',
+                       auto_commit=False)
+
+        # Verify the page was committed
+        page = get_page_by_url(conn, 'https://example.com/tx')
+        self.assertIsNotNone(page)
+        conn.close()
+
+    def test_transaction_context_manager_rolls_back_on_error(self):
+        """transaction() should rollback when an error occurs."""
+        from rag_system.database import (
+            get_connection, insert_page, get_page_by_url, transaction,
+            TransactionError
+        )
+        conn = get_connection(self.temp_path)
+
+        try:
+            with transaction(conn):
+                insert_page(conn, url='https://example.com/rollback', title='Test',
+                           raw_html='', parsed_text='', content_hash='abc',
+                           auto_commit=False)
+                raise ValueError("Simulated error")
+        except TransactionError:
+            pass
+
+        # Verify the page was NOT committed
+        page = get_page_by_url(conn, 'https://example.com/rollback')
+        self.assertIsNone(page)
+        conn.close()
+
+    def test_transaction_rolls_back_on_integrity_error(self):
+        """transaction() should rollback and raise on integrity error."""
+        from rag_system.database import (
+            get_connection, insert_page, get_page_by_url, transaction,
+            IntegrityConstraintError
+        )
+        conn = get_connection(self.temp_path)
+
+        # Insert first page
+        insert_page(conn, url='https://example.com/first', title='First',
+                   raw_html='', parsed_text='', content_hash='abc')
+
+        try:
+            with transaction(conn):
+                # This should fail due to duplicate URL
+                conn.execute(
+                    "INSERT INTO pages (url, title, raw_html, parsed_text, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    ('https://example.com/first', 'Duplicate', '', '', 'def')
+                )
+        except IntegrityConstraintError:
+            pass
+
+        conn.close()
+
+    def test_custom_exceptions_are_proper_subclasses(self):
+        """Custom exceptions should be proper exception subclasses."""
+        from rag_system.database import (
+            DatabaseError, ConnectionError, TransactionError,
+            IntegrityConstraintError, QueryError
+        )
+
+        self.assertTrue(issubclass(ConnectionError, DatabaseError))
+        self.assertTrue(issubclass(TransactionError, DatabaseError))
+        self.assertTrue(issubclass(IntegrityConstraintError, DatabaseError))
+        self.assertTrue(issubclass(QueryError, DatabaseError))
+        self.assertTrue(issubclass(DatabaseError, Exception))
+
+
+class TestRetryDecorator(unittest.TestCase):
+    """Test the retry_on_error decorator."""
+
+    def test_retry_decorator_succeeds_on_first_try(self):
+        """Decorator should not retry if operation succeeds."""
+        from rag_system.database import retry_on_error
+
+        call_count = [0]
+
+        @retry_on_error(max_retries=3, retry_delay=0.01)
+        def successful_operation():
+            call_count[0] += 1
+            return "success"
+
+        result = successful_operation()
+        self.assertEqual(result, "success")
+        self.assertEqual(call_count[0], 1)
+
+    def test_retry_decorator_retries_on_operational_error(self):
+        """Decorator should retry on OperationalError."""
+        from rag_system.database import retry_on_error, ConnectionError
+
+        call_count = [0]
+
+        @retry_on_error(max_retries=2, retry_delay=0.01)
+        def flaky_operation():
+            call_count[0] += 1
+            if call_count[0] < 2:
+                raise sqlite3.OperationalError("database is locked")
+            return "success"
+
+        result = flaky_operation()
+        self.assertEqual(result, "success")
+        self.assertEqual(call_count[0], 2)
+
+    def test_retry_decorator_raises_after_max_retries(self):
+        """Decorator should raise ConnectionError after max retries."""
+        from rag_system.database import retry_on_error, ConnectionError
+
+        call_count = [0]
+
+        @retry_on_error(max_retries=2, retry_delay=0.01)
+        def always_fails():
+            call_count[0] += 1
+            raise sqlite3.OperationalError("database is locked")
+
+        with self.assertRaises(ConnectionError):
+            always_fails()
+
+        self.assertEqual(call_count[0], 3)  # Initial try + 2 retries
+
+
+class TestAutoCommitParameter(unittest.TestCase):
+    """Test the auto_commit parameter on database operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_auto_commit_false_does_not_commit(self):
+        """Operations with auto_commit=False should not commit."""
+        from rag_system.database import get_connection, insert_page, get_page_by_url
+        conn = get_connection(self.temp_path)
+
+        insert_page(conn, url='https://example.com/nocommit', title='Test',
+                   raw_html='', parsed_text='', content_hash='abc',
+                   auto_commit=False)
+
+        # Rollback to verify it wasn't committed
+        conn.rollback()
+
+        page = get_page_by_url(conn, 'https://example.com/nocommit')
+        self.assertIsNone(page)
+        conn.close()
+
+    def test_auto_commit_true_commits(self):
+        """Operations with auto_commit=True (default) should commit."""
+        from rag_system.database import get_connection, insert_page, get_page_by_url
+        conn = get_connection(self.temp_path)
+
+        insert_page(conn, url='https://example.com/commit', title='Test',
+                   raw_html='', parsed_text='', content_hash='abc',
+                   auto_commit=True)
+
+        # Rollback should not affect committed data
+        conn.rollback()
+
+        page = get_page_by_url(conn, 'https://example.com/commit')
+        self.assertIsNotNone(page)
+        conn.close()
+
+
+class TestCrawlSessionSchema(unittest.TestCase):
+    """Test crawl session schema creation."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_init_db_creates_crawl_session_tables(self):
+        """init_db should create crawl_sessions and crawl_queue tables."""
+        from rag_system.database import init_db
+
+        init_db(self.temp_path)
+
+        conn = sqlite3.connect(self.temp_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cursor.fetchall()}
+
+        self.assertIn('crawl_sessions', tables)
+        self.assertIn('crawl_queue', tables)
+        conn.close()
+
+    def test_crawl_sessions_table_has_required_columns(self):
+        """crawl_sessions table should have all required columns."""
+        from rag_system.database import init_db
+
+        init_db(self.temp_path)
+
+        conn = sqlite3.connect(self.temp_path)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(crawl_sessions)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        expected_columns = {
+            'id', 'start_url', 'allowed_domains', 'status',
+            'pages_crawled', 'pages_indexed', 'pages_skipped', 'errors',
+            'started_at', 'completed_at'
+        }
+        self.assertTrue(expected_columns.issubset(columns),
+                       f"Missing columns: {expected_columns - columns}")
+        conn.close()
+
+    def test_crawl_queue_table_has_required_columns(self):
+        """crawl_queue table should have all required columns."""
+        from rag_system.database import init_db
+
+        init_db(self.temp_path)
+
+        conn = sqlite3.connect(self.temp_path)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(crawl_queue)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        expected_columns = {'id', 'session_id', 'url', 'depth', 'added_at'}
+        self.assertTrue(expected_columns.issubset(columns),
+                       f"Missing columns: {expected_columns - columns}")
+        conn.close()
+
+
+class TestCrawlSessionOperations(unittest.TestCase):
+    """Test crawl session CRUD operations."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_create_crawl_session(self):
+        """create_crawl_session should create a new session and return its ID."""
+        from rag_system.database import get_connection, create_crawl_session
+
+        conn = get_connection(self.temp_path)
+        session_id = create_crawl_session(
+            conn,
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=100
+        )
+
+        self.assertIsInstance(session_id, int)
+        self.assertGreater(session_id, 0)
+        conn.close()
+
+    def test_get_crawl_session(self):
+        """get_crawl_session should retrieve session by ID."""
+        from rag_system.database import get_connection, create_crawl_session, get_crawl_session
+
+        conn = get_connection(self.temp_path)
+        session_id = create_crawl_session(
+            conn,
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=100
+        )
+
+        session = get_crawl_session(conn, session_id)
+
+        self.assertIsNotNone(session)
+        self.assertEqual(session['start_url'], 'https://example.com')
+        self.assertEqual(session['status'], 'active')
+        self.assertEqual(session['pages_crawled'], 0)
+        conn.close()
+
+    def test_get_crawl_session_not_found(self):
+        """get_crawl_session should return None for non-existent session."""
+        from rag_system.database import get_connection, get_crawl_session
+
+        conn = get_connection(self.temp_path)
+        session = get_crawl_session(conn, 9999)
+
+        self.assertIsNone(session)
+        conn.close()
+
+    def test_get_active_session_for_url(self):
+        """get_active_session_for_url should find resumable session."""
+        from rag_system.database import (
+            get_connection, create_crawl_session,
+            update_session_status, get_active_session_for_url
+        )
+
+        conn = get_connection(self.temp_path)
+
+        # Create a session and mark it interrupted
+        session_id = create_crawl_session(
+            conn,
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=100
+        )
+        update_session_status(conn, session_id, 'interrupted')
+
+        # Should find the interrupted session
+        found = get_active_session_for_url(conn, 'https://example.com')
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found['id'], session_id)
+        conn.close()
+
+    def test_get_active_session_for_url_no_match(self):
+        """get_active_session_for_url should return None when no session exists."""
+        from rag_system.database import get_connection, get_active_session_for_url
+
+        conn = get_connection(self.temp_path)
+        found = get_active_session_for_url(conn, 'https://nonexistent.com')
+
+        self.assertIsNone(found)
+        conn.close()
+
+    def test_get_active_session_ignores_completed(self):
+        """get_active_session_for_url should not return completed sessions."""
+        from rag_system.database import (
+            get_connection, create_crawl_session,
+            update_session_status, get_active_session_for_url
+        )
+
+        conn = get_connection(self.temp_path)
+
+        session_id = create_crawl_session(
+            conn,
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=100
+        )
+        update_session_status(conn, session_id, 'completed')
+
+        found = get_active_session_for_url(conn, 'https://example.com')
+
+        self.assertIsNone(found)
+        conn.close()
+
+    def test_update_session_status(self):
+        """update_session_status should change session status."""
+        from rag_system.database import (
+            get_connection, create_crawl_session,
+            update_session_status, get_crawl_session
+        )
+
+        conn = get_connection(self.temp_path)
+        session_id = create_crawl_session(
+            conn,
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=100
+        )
+
+        update_session_status(conn, session_id, 'completed')
+
+        session = get_crawl_session(conn, session_id)
+        self.assertEqual(session['status'], 'completed')
+        conn.close()
+
+    def test_update_session_stats(self):
+        """update_session_stats should update crawl statistics."""
+        from rag_system.database import (
+            get_connection, create_crawl_session,
+            update_session_stats, get_crawl_session
+        )
+
+        conn = get_connection(self.temp_path)
+        session_id = create_crawl_session(
+            conn,
+            start_url='https://example.com',
+            allowed_domains=['example.com'],
+            max_pages=100
+        )
+
+        update_session_stats(
+            conn, session_id,
+            pages_crawled=50,
+            pages_indexed=45,
+            pages_skipped=5,
+            errors=2
+        )
+
+        session = get_crawl_session(conn, session_id)
+        self.assertEqual(session['pages_crawled'], 50)
+        self.assertEqual(session['pages_indexed'], 45)
+        self.assertEqual(session['pages_skipped'], 5)
+        self.assertEqual(session['errors'], 2)
+        conn.close()
+
+    def test_list_crawl_sessions(self):
+        """list_crawl_sessions should return all sessions."""
+        from rag_system.database import (
+            get_connection, create_crawl_session, list_crawl_sessions
+        )
+
+        conn = get_connection(self.temp_path)
+        create_crawl_session(conn, 'https://a.com', ['a.com'], 100)
+        create_crawl_session(conn, 'https://b.com', ['b.com'], 200)
+
+        sessions = list_crawl_sessions(conn)
+
+        self.assertEqual(len(sessions), 2)
+        conn.close()
+
+
+class TestCrawlQueueOperations(unittest.TestCase):
+    """Test crawl queue operations."""
+
+    def setUp(self):
+        """Create a temporary database with a session for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, create_crawl_session
+        init_db(self.temp_path)
+        conn = get_connection(self.temp_path)
+        self.session_id = create_crawl_session(
+            conn, 'https://example.com', ['example.com'], 100
+        )
+        conn.close()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_add_urls_to_crawl_queue(self):
+        """add_urls_to_crawl_queue should add URLs to the queue."""
+        from rag_system.database import (
+            get_connection, add_urls_to_crawl_queue, get_crawl_queue_size
+        )
+
+        conn = get_connection(self.temp_path)
+        urls = ['https://example.com/a', 'https://example.com/b']
+        add_urls_to_crawl_queue(conn, self.session_id, urls)
+
+        size = get_crawl_queue_size(conn, self.session_id)
+        self.assertEqual(size, 2)
+        conn.close()
+
+    def test_add_urls_to_crawl_queue_with_depth(self):
+        """add_urls_to_crawl_queue should store depth."""
+        from rag_system.database import (
+            get_connection, add_urls_to_crawl_queue, pop_from_crawl_queue
+        )
+
+        conn = get_connection(self.temp_path)
+        add_urls_to_crawl_queue(
+            conn, self.session_id,
+            ['https://example.com/deep'],
+            depth=3
+        )
+
+        url, depth = pop_from_crawl_queue(conn, self.session_id)
+        self.assertEqual(depth, 3)
+        conn.close()
+
+    def test_add_urls_ignores_duplicates(self):
+        """add_urls_to_crawl_queue should ignore duplicate URLs."""
+        from rag_system.database import (
+            get_connection, add_urls_to_crawl_queue, get_crawl_queue_size
+        )
+
+        conn = get_connection(self.temp_path)
+        add_urls_to_crawl_queue(conn, self.session_id, ['https://example.com/a'])
+        add_urls_to_crawl_queue(conn, self.session_id, ['https://example.com/a'])
+
+        size = get_crawl_queue_size(conn, self.session_id)
+        self.assertEqual(size, 1)
+        conn.close()
+
+    def test_pop_from_crawl_queue(self):
+        """pop_from_crawl_queue should return and remove the oldest URL."""
+        from rag_system.database import (
+            get_connection, add_urls_to_crawl_queue,
+            pop_from_crawl_queue, get_crawl_queue_size
+        )
+
+        conn = get_connection(self.temp_path)
+        add_urls_to_crawl_queue(
+            conn, self.session_id,
+            ['https://example.com/first', 'https://example.com/second']
+        )
+
+        url, depth = pop_from_crawl_queue(conn, self.session_id)
+
+        self.assertEqual(url, 'https://example.com/first')
+        self.assertEqual(get_crawl_queue_size(conn, self.session_id), 1)
+        conn.close()
+
+    def test_pop_from_crawl_queue_empty(self):
+        """pop_from_crawl_queue should return None when queue is empty."""
+        from rag_system.database import get_connection, pop_from_crawl_queue
+
+        conn = get_connection(self.temp_path)
+        result = pop_from_crawl_queue(conn, self.session_id)
+
+        self.assertIsNone(result)
+        conn.close()
+
+    def test_pop_from_crawl_queue_fifo_order(self):
+        """pop_from_crawl_queue should maintain FIFO order."""
+        from rag_system.database import (
+            get_connection, add_urls_to_crawl_queue, pop_from_crawl_queue
+        )
+
+        conn = get_connection(self.temp_path)
+        urls = [f'https://example.com/{i}' for i in range(5)]
+        add_urls_to_crawl_queue(conn, self.session_id, urls)
+
+        popped = []
+        for _ in range(5):
+            url, _ = pop_from_crawl_queue(conn, self.session_id)
+            popped.append(url)
+
+        self.assertEqual(popped, urls)
+        conn.close()
+
+    def test_get_crawl_queue_urls(self):
+        """get_crawl_queue_urls should return all URLs in queue."""
+        from rag_system.database import (
+            get_connection, add_urls_to_crawl_queue, get_crawl_queue_urls
+        )
+
+        conn = get_connection(self.temp_path)
+        urls = ['https://example.com/a', 'https://example.com/b']
+        add_urls_to_crawl_queue(conn, self.session_id, urls)
+
+        queue_urls = get_crawl_queue_urls(conn, self.session_id)
+
+        self.assertEqual(set(queue_urls), set(urls))
+        conn.close()
+
+    def test_clear_crawl_queue(self):
+        """clear_crawl_queue should remove all URLs from queue."""
+        from rag_system.database import (
+            get_connection, add_urls_to_crawl_queue,
+            clear_crawl_queue, get_crawl_queue_size
+        )
+
+        conn = get_connection(self.temp_path)
+        add_urls_to_crawl_queue(conn, self.session_id, ['https://example.com/a'])
+
+        clear_crawl_queue(conn, self.session_id)
+
+        size = get_crawl_queue_size(conn, self.session_id)
+        self.assertEqual(size, 0)
+        conn.close()
+
+
+class TestCrawlSessionLocking(unittest.TestCase):
+    """Test crawl session locking mechanism."""
+
+    def setUp(self):
+        """Create a temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, create_crawl_session
+        init_db(self.temp_path)
+        conn = get_connection(self.temp_path)
+        self.session_id = create_crawl_session(
+            conn, 'https://example.com', ['example.com'], 100
+        )
+        conn.close()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_acquire_session_lock_succeeds_for_interrupted(self):
+        """acquire_session_lock should succeed for interrupted session."""
+        from rag_system.database import (
+            get_connection, update_session_status, acquire_session_lock
+        )
+
+        conn = get_connection(self.temp_path)
+        update_session_status(conn, self.session_id, 'interrupted')
+
+        success = acquire_session_lock(conn, self.session_id)
+
+        self.assertTrue(success)
+        conn.close()
+
+    def test_acquire_session_lock_fails_for_active(self):
+        """acquire_session_lock should fail if session is already active."""
+        from rag_system.database import get_connection, acquire_session_lock
+
+        conn = get_connection(self.temp_path)
+
+        # Session is already 'active' from creation
+        success = acquire_session_lock(conn, self.session_id)
+
+        self.assertFalse(success)
+        conn.close()
+
+    def test_release_session_lock(self):
+        """release_session_lock should mark session as interrupted."""
+        from rag_system.database import (
+            get_connection, update_session_status,
+            acquire_session_lock, release_session_lock, get_crawl_session
+        )
+
+        conn = get_connection(self.temp_path)
+        update_session_status(conn, self.session_id, 'interrupted')
+        acquire_session_lock(conn, self.session_id)
+
+        release_session_lock(conn, self.session_id)
+
+        session = get_crawl_session(conn, self.session_id)
+        self.assertEqual(session['status'], 'interrupted')
         conn.close()
 
 
