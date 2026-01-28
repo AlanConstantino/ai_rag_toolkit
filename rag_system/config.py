@@ -163,6 +163,33 @@ MIN_CONFIDENCE_SCORE: int = int(os.environ.get('RAG_MIN_CONFIDENCE_SCORE', '3'))
 CONFIDENCE_THRESHOLD: float = float(os.environ.get('RAG_CONFIDENCE_THRESHOLD', '0.5'))
 
 # =============================================================================
+# Entity Extraction Settings
+# =============================================================================
+
+# Enable entity extraction during indexing (requires chat client)
+ENTITY_EXTRACTION_ENABLED: bool = os.environ.get(
+    'RAG_ENTITY_EXTRACTION_ENABLED', 'false'
+).lower() in ('true', '1', 'yes')
+
+# =============================================================================
+# Page Summarization Settings
+# =============================================================================
+
+# Enable page summarization during indexing (requires chat client)
+PAGE_SUMMARIZATION_ENABLED: bool = os.environ.get(
+    'RAG_PAGE_SUMMARIZATION_ENABLED', 'false'
+).lower() in ('true', '1', 'yes')
+
+# =============================================================================
+# System Summary Settings
+# =============================================================================
+
+# Enable automatic system and global summary generation after crawl
+SYSTEM_SUMMARIES_ENABLED: bool = os.environ.get(
+    'RAG_SYSTEM_SUMMARIES_ENABLED', 'false'
+).lower() in ('true', '1', 'yes')
+
+# =============================================================================
 # Embedding Settings
 # =============================================================================
 

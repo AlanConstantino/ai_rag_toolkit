@@ -12,13 +12,14 @@ from rag_system import config
 from rag_system.api_client import APIError, RateLimitError
 from rag_system.database import (
     get_connection, insert_page, get_page_by_url,
-    insert_chunk, update_chunk_embedding,
+    insert_chunk, update_chunk_embedding, update_page_summary,
     delete_chunks_by_page, delete_doc_terms_by_page, update_page_content,
     create_crawl_session, get_active_session_for_url, get_crawl_session,
     update_session_status, update_session_stats, acquire_session_lock,
     add_urls_to_crawl_queue, get_crawl_queue_urls, clear_crawl_queue,
     create_embedding_job, update_embedding_job_progress, update_embedding_job_status,
-    get_chunks_without_embeddings
+    get_chunks_without_embeddings,
+    insert_entity, insert_relationship, link_chunk_to_entity, get_entity_by_name
 )
 from rag_system.shutdown import is_shutdown_requested
 from rag_system.ingestion.crawler import Crawler
@@ -216,6 +217,16 @@ class Indexer:
                     conn, chunk_result['small_chunks'], small_chunk_ids, page_title
                 )
 
+            # Extract entities if enabled and chat client available
+            if config.ENTITY_EXTRACTION_ENABLED and self.chat_client:
+                self._extract_and_store_entities(
+                    conn, parsed['text'], page_id, small_chunk_ids
+                )
+
+            # Generate page summary if enabled and chat client available
+            if config.PAGE_SUMMARIZATION_ENABLED and self.chat_client:
+                self._generate_page_summary(conn, page_id, parsed['text'])
+
             return page_id
 
         finally:
@@ -367,6 +378,91 @@ class Indexer:
 
         parts.append(chunk['content'])
         return '\n'.join(parts)
+
+    def _extract_and_store_entities(self, conn, text: str, page_id: int,
+                                      chunk_ids: List[int]) -> None:
+        """Extract entities from text and store in database.
+
+        Args:
+            conn: Database connection.
+            text: Page text content.
+            page_id: ID of the page being indexed.
+            chunk_ids: List of chunk IDs to link entities to.
+        """
+        try:
+            from rag_system.knowledge_graph.entity_extractor import EntityExtractor
+
+            extractor = EntityExtractor(self.chat_client)
+            result = extractor.extract(text)
+
+            entities = result.get('entities', [])
+            relationships = result.get('relationships', [])
+
+            logger.debug(f"Extracted {len(entities)} entities, {len(relationships)} relationships")
+
+            # Store entities and build name-to-id mapping
+            entity_ids = {}
+            for entity in entities:
+                name = entity.get('name', '')
+                entity_type = entity.get('type', 'concept')
+                description = entity.get('description', '')
+
+                if not name:
+                    continue
+
+                # Check if entity already exists
+                existing = get_entity_by_name(conn, name)
+                if existing:
+                    entity_id = existing['id']
+                else:
+                    entity_id = insert_entity(conn, name, entity_type, description)
+
+                entity_ids[name] = entity_id
+
+                # Link entity to all chunks from this page
+                for chunk_id in chunk_ids:
+                    link_chunk_to_entity(conn, chunk_id, entity_id)
+
+            # Store relationships
+            for rel in relationships:
+                source_name = rel.get('source', '')
+                target_name = rel.get('target', '')
+                rel_type = rel.get('type', 'related_to')
+                description = rel.get('description', '')
+
+                source_id = entity_ids.get(source_name)
+                target_id = entity_ids.get(target_name)
+
+                if source_id and target_id:
+                    insert_relationship(conn, source_id, target_id, rel_type, description)
+
+            logger.debug(f"Stored {len(entity_ids)} entities for page {page_id}")
+
+        except Exception as e:
+            logger.warning(f"Entity extraction failed for page {page_id}: {e}")
+            # Don't re-raise - entity extraction failure shouldn't block indexing
+
+    def _generate_page_summary(self, conn, page_id: int, text: str) -> None:
+        """Generate and store summary for a page.
+
+        Args:
+            conn: Database connection.
+            page_id: ID of the page to summarize.
+            text: Page text content.
+        """
+        try:
+            from rag_system.summarization.summarizer import PageSummarizer
+
+            summarizer = PageSummarizer(self.chat_client)
+            summary = summarizer.summarize(text)
+
+            if summary:
+                update_page_summary(conn, page_id, summary)
+                logger.debug(f"Generated summary for page {page_id}")
+
+        except Exception as e:
+            logger.warning(f"Page summarization failed for page {page_id}: {e}")
+            # Don't re-raise - summarization failure shouldn't block indexing
 
     def index_pages(self, pages: List[Dict[str, Any]]) -> List[Optional[int]]:
         """Index multiple pages.
@@ -527,13 +623,26 @@ class Indexer:
             bm25_index.build()
             logger.info("BM25 index built successfully")
 
+            # Generate system and global summaries if enabled
+            summary_stats = None
+            if config.SYSTEM_SUMMARIES_ENABLED and self.chat_client:
+                from rag_system.summarization.summarizer import SummarizationPipeline
+                logger.info("Generating system and global summaries...")
+                pipeline = SummarizationPipeline(self.db_path, self.chat_client)
+                summary_stats = pipeline.rebuild_all_summaries()
+                logger.info(
+                    f"Summary generation complete: {summary_stats['systems_summarized']} "
+                    f"systems, global={'Yes' if summary_stats['global_summary_generated'] else 'No'}"
+                )
+
             return {
                 'pages_crawled': pages_crawled,
                 'pages_indexed': pages_indexed,
                 'pages_skipped': pages_skipped,
                 'errors': errors,
                 'session_id': session_id,
-                'resumed': resuming
+                'resumed': resuming,
+                'summary_stats': summary_stats
             }
 
         finally:

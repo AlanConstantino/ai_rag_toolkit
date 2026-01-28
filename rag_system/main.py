@@ -173,6 +173,44 @@ def create_parser() -> argparse.ArgumentParser:
     # Rebuild BM25 index command
     subparsers.add_parser('rebuild-index', help='Rebuild the BM25 search index')
 
+    # Rebuild summaries command
+    rebuild_summaries_parser = subparsers.add_parser(
+        'rebuild-summaries',
+        help='Regenerate page, system, and global summaries'
+    )
+    rebuild_summaries_parser.add_argument(
+        '--json', action='store_true',
+        help='Output results as JSON'
+    )
+
+    # Export knowledge graph command
+    export_graph_parser = subparsers.add_parser(
+        'export-graph',
+        help='Export knowledge graph as JSON'
+    )
+    export_graph_parser.add_argument(
+        '--output', '-o', type=str, metavar='FILE',
+        help='Output file path (default: stdout)'
+    )
+    export_graph_parser.add_argument(
+        '--pretty', action='store_true',
+        help='Pretty-print JSON output'
+    )
+
+    # Validate database command
+    validate_parser = subparsers.add_parser(
+        'validate',
+        help='Validate database integrity'
+    )
+    validate_parser.add_argument(
+        '--fix', action='store_true',
+        help='Attempt to fix issues (where possible)'
+    )
+    validate_parser.add_argument(
+        '--json', action='store_true',
+        help='Output results as JSON'
+    )
+
     # Stats command
     subparsers.add_parser('stats', help='Show system statistics')
 
@@ -1077,6 +1115,185 @@ def main() -> None:
                     print(f"Index rebuilt: {stats['total_docs']} documents indexed")
                 else:
                     print("Warning: Index may not have built correctly")
+            finally:
+                conn.close()
+
+        elif args.command == 'rebuild-summaries':
+            if not rag.chat_client:
+                print("Error: No chat client configured.")
+                print("Set OPENAI_API_KEY or configure RAG_CHAT_API_ENDPOINT")
+                import sys
+                sys.exit(1)
+
+            from rag_system.summarization.summarizer import SummarizationPipeline
+            import json as json_module
+
+            print("Rebuilding summaries...")
+            pipeline = SummarizationPipeline(args.db, rag.chat_client)
+            stats = pipeline.rebuild_all_summaries()
+
+            if args.json:
+                print(json_module.dumps(stats, indent=2))
+            else:
+                print("Summary Rebuild Results")
+                print("=" * 40)
+                print(f"Pages summarized: {stats['pages_summarized']}")
+                print(f"Systems created: {stats['systems_created']}")
+                print(f"Systems summarized: {stats['systems_summarized']}")
+                print(f"Global summary: {'Yes' if stats['global_summary_generated'] else 'No'}")
+                if stats['errors']:
+                    print(f"Errors: {len(stats['errors'])}")
+                    for error in stats['errors'][:5]:
+                        print(f"  - {error}")
+
+        elif args.command == 'export-graph':
+            import json as json_module
+
+            conn = get_connection(args.db)
+            try:
+                # Get all entities
+                cursor = conn.execute("SELECT * FROM entities")
+                entities = [dict(row) for row in cursor.fetchall()]
+
+                # Get all relationships
+                cursor = conn.execute("""
+                    SELECT r.*, 
+                           e1.name as source_name, 
+                           e2.name as target_name
+                    FROM relationships r
+                    JOIN entities e1 ON r.source_entity_id = e1.id
+                    JOIN entities e2 ON r.target_entity_id = e2.id
+                """)
+                relationships = [dict(row) for row in cursor.fetchall()]
+
+                graph = {
+                    'entities': entities,
+                    'relationships': relationships,
+                    'stats': {
+                        'entity_count': len(entities),
+                        'relationship_count': len(relationships)
+                    }
+                }
+
+                indent = 2 if args.pretty else None
+                json_output = json_module.dumps(graph, indent=indent)
+
+                if args.output:
+                    with open(args.output, 'w') as f:
+                        f.write(json_output)
+                    print(f"Knowledge graph exported to {args.output}")
+                    print(f"  Entities: {len(entities)}")
+                    print(f"  Relationships: {len(relationships)}")
+                else:
+                    print(json_output)
+
+            finally:
+                conn.close()
+
+        elif args.command == 'validate':
+            import json as json_module
+
+            conn = get_connection(args.db)
+            issues = []
+            fixes_applied = []
+
+            try:
+                # Check 1: Orphaned chunks (no page)
+                cursor = conn.execute("""
+                    SELECT COUNT(*) as count FROM chunks c
+                    LEFT JOIN pages p ON c.page_id = p.id
+                    WHERE p.id IS NULL
+                """)
+                orphaned_chunks = cursor.fetchone()['count']
+                if orphaned_chunks > 0:
+                    issues.append({
+                        'type': 'orphaned_chunks',
+                        'count': orphaned_chunks,
+                        'description': f'{orphaned_chunks} chunks have no associated page'
+                    })
+                    if args.fix:
+                        conn.execute("""
+                            DELETE FROM chunks WHERE page_id NOT IN (SELECT id FROM pages)
+                        """)
+                        conn.commit()
+                        fixes_applied.append(f'Deleted {orphaned_chunks} orphaned chunks')
+
+                # Check 2: Chunks without embeddings (when AI is enabled)
+                if config.AI_ENABLED:
+                    cursor = conn.execute(
+                        "SELECT COUNT(*) as count FROM chunks WHERE embedding_json IS NULL"
+                    )
+                    missing_embeddings = cursor.fetchone()['count']
+                    if missing_embeddings > 0:
+                        issues.append({
+                            'type': 'missing_embeddings',
+                            'count': missing_embeddings,
+                            'description': f'{missing_embeddings} chunks are missing embeddings'
+                        })
+
+                # Check 3: Pages without summaries (if summarization is enabled)
+                cursor = conn.execute(
+                    "SELECT COUNT(*) as count FROM pages WHERE summary IS NULL OR summary = ''"
+                )
+                missing_summaries = cursor.fetchone()['count']
+                if missing_summaries > 0:
+                    issues.append({
+                        'type': 'missing_summaries',
+                        'count': missing_summaries,
+                        'description': f'{missing_summaries} pages are missing summaries'
+                    })
+
+                # Check 4: BM25 index consistency
+                from rag_system.database import get_corpus_stats
+                corpus_stats = get_corpus_stats(conn)
+                cursor = conn.execute("SELECT COUNT(*) as count FROM chunks")
+                total_chunks = cursor.fetchone()['count']
+                if corpus_stats:
+                    indexed_docs = corpus_stats.get('total_docs', 0)
+                    if indexed_docs != total_chunks:
+                        issues.append({
+                            'type': 'bm25_index_mismatch',
+                            'indexed': indexed_docs,
+                            'actual': total_chunks,
+                            'description': f'BM25 index has {indexed_docs} docs but {total_chunks} chunks exist'
+                        })
+                        if args.fix:
+                            from rag_system.search.bm25_search import BM25Index
+                            bm25_index = BM25Index(args.db)
+                            bm25_index.build()
+                            fixes_applied.append('Rebuilt BM25 index')
+
+                # Check 5: Database integrity
+                cursor = conn.execute("PRAGMA integrity_check")
+                integrity = cursor.fetchone()[0]
+                if integrity != 'ok':
+                    issues.append({
+                        'type': 'integrity_error',
+                        'description': f'SQLite integrity check failed: {integrity}'
+                    })
+
+                result = {
+                    'valid': len(issues) == 0,
+                    'issues': issues,
+                    'fixes_applied': fixes_applied
+                }
+
+                if args.json:
+                    print(json_module.dumps(result, indent=2))
+                else:
+                    if result['valid']:
+                        print("Database validation: PASSED")
+                        print("No issues found.")
+                    else:
+                        print("Database validation: ISSUES FOUND")
+                        print("=" * 40)
+                        for issue in issues:
+                            print(f"- [{issue['type']}] {issue['description']}")
+                        if fixes_applied:
+                            print("\nFixes applied:")
+                            for fix in fixes_applied:
+                                print(f"  - {fix}")
+
             finally:
                 conn.close()
 

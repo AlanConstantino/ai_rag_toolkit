@@ -798,5 +798,293 @@ class TestGenerateEmbeddingsWithRateLimit(unittest.TestCase):
         conn.close()
 
 
+class TestEntityExtractionIntegration(unittest.TestCase):
+    """Tests for entity extraction integration in indexer pipeline."""
+
+    def setUp(self):
+        """Create temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_entity_extraction_called_when_enabled(self):
+        """Entity extraction should be called when enabled and chat client available."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection
+
+        mock_chat_client = MagicMock()
+        mock_chat_client.complete_json.return_value = {
+            'entities': [
+                {'name': 'TestSystem', 'type': 'system', 'description': 'A test system'}
+            ],
+            'relationships': []
+        }
+
+        indexer = Indexer(self.temp_path, chat_client=mock_chat_client)
+
+        page_data = {
+            'url': 'https://example.com/test',
+            'html': '<html><head><title>Test</title></head><body><p>TestSystem is great.</p></body></html>',
+            'status_code': 200
+        }
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.ENTITY_EXTRACTION_ENABLED = True
+            mock_config.PAGE_SUMMARIZATION_ENABLED = False
+            mock_config.SMALL_CHUNK_SIZE = 500
+            mock_config.LARGE_CHUNK_SIZE = 2000
+            mock_config.CHUNK_OVERLAP = 100
+
+            page_id = indexer.index_page(page_data)
+
+        self.assertIsNotNone(page_id)
+        # Verify entity extraction was called
+        mock_chat_client.complete_json.assert_called()
+
+    def test_entity_extraction_skipped_when_disabled(self):
+        """Entity extraction should not be called when disabled."""
+        from rag_system.ingestion.indexer import Indexer
+
+        mock_chat_client = MagicMock()
+        indexer = Indexer(self.temp_path, chat_client=mock_chat_client)
+
+        page_data = {
+            'url': 'https://example.com/test',
+            'html': '<html><head><title>Test</title></head><body>Content</body></html>',
+            'status_code': 200
+        }
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.ENTITY_EXTRACTION_ENABLED = False
+            mock_config.PAGE_SUMMARIZATION_ENABLED = False
+            mock_config.SMALL_CHUNK_SIZE = 500
+            mock_config.LARGE_CHUNK_SIZE = 2000
+            mock_config.CHUNK_OVERLAP = 100
+
+            page_id = indexer.index_page(page_data)
+
+        self.assertIsNotNone(page_id)
+        # complete_json is used for entity extraction, should not be called
+        mock_chat_client.complete_json.assert_not_called()
+
+    def test_entities_stored_in_database(self):
+        """Extracted entities should be stored in the database."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, get_entity_by_name
+
+        mock_chat_client = MagicMock()
+        mock_chat_client.complete_json.return_value = {
+            'entities': [
+                {'name': 'ConfigManager', 'type': 'system', 'description': 'Manages configs'}
+            ],
+            'relationships': []
+        }
+
+        indexer = Indexer(self.temp_path, chat_client=mock_chat_client)
+
+        page_data = {
+            'url': 'https://example.com/config',
+            'html': '<html><head><title>Config</title></head><body><p>ConfigManager handles all settings.</p></body></html>',
+            'status_code': 200
+        }
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.ENTITY_EXTRACTION_ENABLED = True
+            mock_config.PAGE_SUMMARIZATION_ENABLED = False
+            mock_config.SMALL_CHUNK_SIZE = 500
+            mock_config.LARGE_CHUNK_SIZE = 2000
+            mock_config.CHUNK_OVERLAP = 100
+
+            indexer.index_page(page_data)
+
+        # Verify entity is in database
+        conn = get_connection(self.temp_path)
+        try:
+            entity = get_entity_by_name(conn, 'ConfigManager')
+            self.assertIsNotNone(entity)
+            self.assertEqual(entity['type'], 'system')
+        finally:
+            conn.close()
+
+    def test_entity_extraction_failure_does_not_block_indexing(self):
+        """Entity extraction failures should not prevent page indexing."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, get_page_by_url
+
+        mock_chat_client = MagicMock()
+        mock_chat_client.complete_json.side_effect = Exception("LLM API error")
+
+        indexer = Indexer(self.temp_path, chat_client=mock_chat_client)
+
+        page_data = {
+            'url': 'https://example.com/test',
+            'html': '<html><head><title>Test</title></head><body>Content</body></html>',
+            'status_code': 200
+        }
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.ENTITY_EXTRACTION_ENABLED = True
+            mock_config.PAGE_SUMMARIZATION_ENABLED = False
+            mock_config.SMALL_CHUNK_SIZE = 500
+            mock_config.LARGE_CHUNK_SIZE = 2000
+            mock_config.CHUNK_OVERLAP = 100
+
+            # Should not raise, despite extraction failure
+            page_id = indexer.index_page(page_data)
+
+        self.assertIsNotNone(page_id)
+
+        # Page should still be indexed
+        conn = get_connection(self.temp_path)
+        try:
+            page = get_page_by_url(conn, 'https://example.com/test')
+            self.assertIsNotNone(page)
+        finally:
+            conn.close()
+
+
+class TestPageSummarizationIntegration(unittest.TestCase):
+    """Tests for page summarization integration in indexer pipeline."""
+
+    def setUp(self):
+        """Create temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db
+        init_db(self.temp_path)
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_summarization_called_when_enabled(self):
+        """Page summarization should be called when enabled."""
+        from rag_system.ingestion.indexer import Indexer
+
+        mock_chat_client = MagicMock()
+        mock_chat_client.complete.return_value = "This page is about configuration."
+
+        indexer = Indexer(self.temp_path, chat_client=mock_chat_client)
+
+        page_data = {
+            'url': 'https://example.com/config',
+            'html': '<html><head><title>Config</title></head><body><p>Configuration details here.</p></body></html>',
+            'status_code': 200
+        }
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.ENTITY_EXTRACTION_ENABLED = False
+            mock_config.PAGE_SUMMARIZATION_ENABLED = True
+            mock_config.SMALL_CHUNK_SIZE = 500
+            mock_config.LARGE_CHUNK_SIZE = 2000
+            mock_config.CHUNK_OVERLAP = 100
+
+            indexer.index_page(page_data)
+
+        # complete is used for summarization
+        mock_chat_client.complete.assert_called()
+
+    def test_summary_stored_in_database(self):
+        """Page summary should be stored in the pages table."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, get_page_by_url
+
+        mock_chat_client = MagicMock()
+        mock_chat_client.complete.return_value = "A summary of the page content."
+
+        indexer = Indexer(self.temp_path, chat_client=mock_chat_client)
+
+        page_data = {
+            'url': 'https://example.com/test',
+            'html': '<html><head><title>Test</title></head><body><p>Page content here.</p></body></html>',
+            'status_code': 200
+        }
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.ENTITY_EXTRACTION_ENABLED = False
+            mock_config.PAGE_SUMMARIZATION_ENABLED = True
+            mock_config.SMALL_CHUNK_SIZE = 500
+            mock_config.LARGE_CHUNK_SIZE = 2000
+            mock_config.CHUNK_OVERLAP = 100
+
+            indexer.index_page(page_data)
+
+        # Verify summary is stored
+        conn = get_connection(self.temp_path)
+        try:
+            page = get_page_by_url(conn, 'https://example.com/test')
+            self.assertIsNotNone(page)
+            self.assertEqual(page['summary'], "A summary of the page content.")
+        finally:
+            conn.close()
+
+    def test_summarization_skipped_when_disabled(self):
+        """Summarization should not be called when disabled."""
+        from rag_system.ingestion.indexer import Indexer
+
+        mock_chat_client = MagicMock()
+        indexer = Indexer(self.temp_path, chat_client=mock_chat_client)
+
+        page_data = {
+            'url': 'https://example.com/test',
+            'html': '<html><head><title>Test</title></head><body>Content</body></html>',
+            'status_code': 200
+        }
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.ENTITY_EXTRACTION_ENABLED = False
+            mock_config.PAGE_SUMMARIZATION_ENABLED = False
+            mock_config.SMALL_CHUNK_SIZE = 500
+            mock_config.LARGE_CHUNK_SIZE = 2000
+            mock_config.CHUNK_OVERLAP = 100
+
+            indexer.index_page(page_data)
+
+        # complete should not be called for summarization
+        mock_chat_client.complete.assert_not_called()
+
+    def test_summarization_failure_does_not_block_indexing(self):
+        """Summarization failures should not prevent page indexing."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, get_page_by_url
+
+        mock_chat_client = MagicMock()
+        mock_chat_client.complete.side_effect = Exception("LLM API error")
+
+        indexer = Indexer(self.temp_path, chat_client=mock_chat_client)
+
+        page_data = {
+            'url': 'https://example.com/test',
+            'html': '<html><head><title>Test</title></head><body>Content</body></html>',
+            'status_code': 200
+        }
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.ENTITY_EXTRACTION_ENABLED = False
+            mock_config.PAGE_SUMMARIZATION_ENABLED = True
+            mock_config.SMALL_CHUNK_SIZE = 500
+            mock_config.LARGE_CHUNK_SIZE = 2000
+            mock_config.CHUNK_OVERLAP = 100
+
+            page_id = indexer.index_page(page_data)
+
+        self.assertIsNotNone(page_id)
+
+        # Page should still be indexed
+        conn = get_connection(self.temp_path)
+        try:
+            page = get_page_by_url(conn, 'https://example.com/test')
+            self.assertIsNotNone(page)
+        finally:
+            conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1179,6 +1179,32 @@ def get_system_by_name(conn: sqlite3.Connection, name: str) -> Optional[Dict[str
     return dict(row) if row else None
 
 
+def update_system_summary(conn: sqlite3.Connection, system_id: int,
+                          summary: str, auto_commit: bool = True) -> None:
+    """Update the summary for a system.
+
+    Args:
+        conn: Database connection.
+        system_id: ID of the system to update.
+        summary: New summary text.
+        auto_commit: If True, commit after update.
+
+    Raises:
+        QueryError: If the update fails.
+    """
+    try:
+        conn.execute(
+            "UPDATE systems SET summary = ? WHERE id = ?",
+            (summary, system_id)
+        )
+        if auto_commit:
+            conn.commit()
+    except sqlite3.Error as e:
+        if auto_commit:
+            conn.rollback()
+        raise QueryError(f"Failed to update system summary: {e}") from e
+
+
 # =============================================================================
 # Query Cache Operations
 # =============================================================================
