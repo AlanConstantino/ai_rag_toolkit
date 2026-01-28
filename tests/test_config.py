@@ -136,7 +136,7 @@ class TestConfigValidation(unittest.TestCase):
             self.assertEqual(weight_errors, [])
 
     def test_ai_enabled_flag_default(self):
-        """AI_ENABLED should default to True."""
+        """AI_ENABLED should default to False (BM25 mode)."""
         # Clear any RAG_AI_ENABLED env var
         env = {k: v for k, v in os.environ.items() if k != 'RAG_AI_ENABLED'}
         with mock.patch.dict(os.environ, env, clear=True):
@@ -144,7 +144,7 @@ class TestConfigValidation(unittest.TestCase):
             from rag_system import config
             importlib.reload(config)
 
-            self.assertTrue(config.AI_ENABLED)
+            self.assertFalse(config.AI_ENABLED)
 
     def test_ai_enabled_flag_false(self):
         """AI_ENABLED should be False when set to false."""

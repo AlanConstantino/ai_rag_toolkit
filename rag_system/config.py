@@ -18,7 +18,7 @@ class ConfigurationError(Exception):
 # =============================================================================
 
 # When disabled, the system uses BM25 search only (no embeddings or LLM calls)
-AI_ENABLED: bool = os.environ.get('RAG_AI_ENABLED', 'true').lower() in ('true', '1', 'yes')
+AI_ENABLED: bool = os.environ.get('RAG_AI_ENABLED', 'false').lower() in ('true', '1', 'yes')
 
 # =============================================================================
 # API Configuration
