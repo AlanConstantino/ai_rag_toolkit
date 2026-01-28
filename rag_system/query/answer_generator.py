@@ -1,14 +1,32 @@
 """Answer generator module for the RAG system.
 
-Generates answers from context using LLM.
+Generates answers from context using LLM with grounding safeguards.
 """
 
 import re
 from typing import Dict, List, Any, Optional
 
 from rag_system.utils import get_logger
+from rag_system.query.citation_validator import extract_citations, validate_citations
 
 logger = get_logger(__name__)
+
+
+# Grounded answer prompt template with citation requirements
+GROUNDED_PROMPT_TEMPLATE = """You are a documentation assistant. Answer the question using ONLY the provided context.
+
+CRITICAL INSTRUCTIONS:
+1. Your answer must come from the context below - do not use outside knowledge
+2. Cite your sources using [CHUNK:id] format for each fact you state
+3. If you cannot answer from the context, say so honestly
+4. Do not fabricate or hallucinate information
+
+CONTEXT (with chunk IDs for citation):
+{context}
+
+QUESTION: {query}
+
+Provide a clear, accurate answer with [CHUNK:id] citations for each claim. If the context doesn't contain enough information to answer, explain what's missing."""
 
 
 # Answer prompt templates by query type
@@ -154,6 +172,69 @@ def get_fallback_response(query: str) -> str:
                 "Try rephrasing or asking about a specific topic.")
 
 
+def build_grounded_answer_prompt(query: str, chunks: List[Dict[str, Any]]) -> str:
+    """Build prompt for grounded answer generation with chunk IDs.
+
+    Args:
+        query: Original query.
+        chunks: List of chunk dicts with 'id' and 'content' keys.
+
+    Returns:
+        Complete prompt string with chunk IDs for citation.
+    """
+    if not chunks:
+        context = "No context available."
+    else:
+        context_parts = []
+        for chunk in chunks:
+            chunk_id = chunk.get('id', 0)
+            content = chunk.get('content', '')
+            context_parts.append(f"[CHUNK:{chunk_id}]\n{content}")
+        context = "\n\n".join(context_parts)
+
+    return GROUNDED_PROMPT_TEMPLATE.format(query=query, context=context)
+
+
+def format_fallback_response(chunks: List[Dict[str, Any]]) -> str:
+    """Format a fallback response with relevant passages.
+
+    Instead of saying "I don't know", shows the user what was found
+    to keep them moving forward.
+
+    Args:
+        chunks: List of chunk dicts with content and source info.
+
+    Returns:
+        Constructive fallback response with relevant passages.
+    """
+    if not chunks:
+        return (
+            "I couldn't find relevant information to answer your question. "
+            "Try rephrasing with different terms or checking the documentation directly."
+        )
+
+    response_parts = [
+        "I couldn't find an exact answer to your question, but here are "
+        "the most relevant passages I found:\n"
+    ]
+
+    for chunk in chunks[:3]:  # Limit to top 3 chunks
+        chunk_id = chunk.get('id', 0)
+        content = chunk.get('content', '')
+        source = chunk.get('page_url', '') or chunk.get('page_title', 'Unknown source')
+
+        # Truncate content if too long
+        if len(content) > 200:
+            content = content[:200] + "..."
+
+        response_parts.append(f'\n[CHUNK:{chunk_id}] "{content}"')
+        response_parts.append(f"Source: {source}\n")
+
+    response_parts.append("\nYou may find your answer in these sections.")
+
+    return "".join(response_parts)
+
+
 class AnswerGenerator:
     """Generates answers from context using LLM."""
 
@@ -236,3 +317,71 @@ class AnswerGenerator:
         """
         raw_answer = self.generate(query, context, query_type)
         return format_answer(raw_answer, sources=sources)
+
+    def generate_grounded(self, query: str, chunks: List[Dict[str, Any]],
+                          confidence: float = 1.0) -> Dict[str, Any]:
+        """Generate a grounded answer with citation validation.
+
+        Uses stronger grounding prompts and validates that all citations
+        reference real chunks to catch hallucinations.
+
+        Args:
+            query: Original query.
+            chunks: List of chunk dicts with 'id', 'content', and source info.
+            confidence: Confidence score (0-1). Low confidence triggers fallback.
+
+        Returns:
+            Dict with:
+                - answer: The generated answer text
+                - citations_valid: True if all citations reference real chunks
+                - valid_citations: List of valid chunk IDs cited
+                - invalid_citations: List of fabricated chunk IDs
+                - used_fallback: True if fallback response was used
+        """
+        # Build set of valid chunk IDs
+        valid_chunk_ids = {chunk.get('id') for chunk in chunks if chunk.get('id')}
+
+        # Use fallback for very low confidence
+        if confidence < 0.3 or not chunks:
+            return {
+                'answer': format_fallback_response(chunks),
+                'citations_valid': True,
+                'valid_citations': [],
+                'invalid_citations': [],
+                'used_fallback': True
+            }
+
+        if not self.chat_client:
+            return {
+                'answer': "Answer generation is not configured.",
+                'citations_valid': True,
+                'valid_citations': [],
+                'invalid_citations': [],
+                'used_fallback': False
+            }
+
+        try:
+            # Build grounded prompt with chunk IDs
+            prompt = build_grounded_answer_prompt(query, chunks)
+            raw_answer = self.chat_client.complete(prompt)
+
+            # Validate citations in the response
+            validation = validate_citations(raw_answer, valid_chunk_ids)
+
+            return {
+                'answer': raw_answer.strip(),
+                'citations_valid': validation.is_valid,
+                'valid_citations': validation.valid_citations,
+                'invalid_citations': validation.invalid_citations,
+                'used_fallback': False
+            }
+
+        except Exception as e:
+            logger.error(f"Grounded answer generation failed: {e}")
+            return {
+                'answer': format_fallback_response(chunks),
+                'citations_valid': True,
+                'valid_citations': [],
+                'invalid_citations': [],
+                'used_fallback': True
+            }
