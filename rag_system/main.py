@@ -255,15 +255,17 @@ def format_query_result(result: Dict[str, Any]) -> str:
     confidence_pct = int(confidence * 100)
     lines.append(f"Confidence: {confidence_pct}%")
 
-    # Sources
-    chunks = result.get('chunks', [])
-    if chunks:
+    # Sources - deduplicated by URL, showing page title and URL
+    sources = result.get('sources', [])
+    if sources:
         lines.append("")
         lines.append("Sources:")
-        for i, chunk in enumerate(chunks[:3], 1):
-            score = chunk.get('score', 0)
-            content = chunk.get('content', '')[:100]
-            lines.append(f"  {i}. [{score:.2f}] {content}...")
+        for source in sources:
+            title = source.get('page_title', 'Untitled')
+            url = source.get('page_url', '')
+            lines.append(f"  \u2022 {title}")
+            if url:
+                lines.append(f"    {url}")
 
     return '\n'.join(lines)
 
@@ -444,13 +446,14 @@ class RAGSystem:
         # Diversify
         diversified = self.diversifier.diversify(reranked, top_k=top_k)
 
-        # Build chunk info
+        # Build chunk info with page metadata for citations
         chunks = []
         conn = get_connection(self.db_path)
         try:
             for chunk_id, score in diversified:
                 cursor = conn.execute(
-                    "SELECT content, heading_path FROM chunks WHERE id = ?",
+                    """SELECT c.content, c.heading_path, p.title as page_title, p.url as page_url
+                       FROM chunks c JOIN pages p ON c.page_id = p.id WHERE c.id = ?""",
                     (chunk_id,)
                 )
                 row = cursor.fetchone()
@@ -459,7 +462,9 @@ class RAGSystem:
                         'id': chunk_id,
                         'score': score,
                         'content': row['content'],
-                        'heading_path': row['heading_path']
+                        'heading_path': row['heading_path'],
+                        'page_title': row['page_title'],
+                        'page_url': row['page_url']
                     })
         finally:
             conn.close()
@@ -516,11 +521,24 @@ class RAGSystem:
         for name, value in timing_metrics.items():
             metrics_collector.record(name, value)
 
+        # Build deduplicated sources list for citations
+        seen_urls = set()
+        sources = []
+        for chunk in chunks:
+            url = chunk.get('page_url', '')
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                sources.append({
+                    'page_title': chunk.get('page_title', 'Untitled'),
+                    'page_url': url
+                })
+
         result = {
             'query': question,
             'query_type': query_type,
             'answer': answer,
             'chunks': chunks,
+            'sources': sources,
             'confidence': metrics['overall'],
             'metrics': metrics,
             'timing': timing_metrics,
