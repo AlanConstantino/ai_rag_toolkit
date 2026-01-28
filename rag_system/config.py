@@ -169,6 +169,8 @@ CONFIDENCE_THRESHOLD: float = float(os.environ.get('RAG_CONFIDENCE_THRESHOLD', '
 EMBEDDING_BATCH_SIZE: int = int(os.environ.get('RAG_EMBEDDING_BATCH_SIZE', '100'))
 EMBEDDING_BATCH_DELAY: float = float(os.environ.get('RAG_EMBEDDING_BATCH_DELAY', '0.1'))
 EMBEDDING_MAX_RETRIES: int = int(os.environ.get('RAG_EMBEDDING_MAX_RETRIES', '3'))
+EMBEDDING_STOP_ON_RATE_LIMIT: bool = os.environ.get('RAG_EMBEDDING_STOP_ON_RATE_LIMIT', 'true').lower() in ('true', '1', 'yes')
+EMBEDDING_RETRY_DELAY: float = float(os.environ.get('RAG_EMBEDDING_RETRY_DELAY', '1.0'))
 
 # =============================================================================
 # HTTP Cache Configuration
@@ -385,6 +387,12 @@ def validate_config(require_apis: bool = False) -> Tuple[bool, List[str]]:
         errors.append(
             f"RAG_EMBEDDING_MAX_RETRIES must be non-negative, "
             f"got {EMBEDDING_MAX_RETRIES}"
+        )
+
+    if EMBEDDING_RETRY_DELAY < 0:
+        errors.append(
+            f"RAG_EMBEDDING_RETRY_DELAY must be non-negative, "
+            f"got {EMBEDDING_RETRY_DELAY}"
         )
 
     # Validate crawler retry settings

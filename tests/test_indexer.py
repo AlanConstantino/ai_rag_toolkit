@@ -542,5 +542,261 @@ class TestCrawlSessionIntegration(unittest.TestCase):
         self.assertEqual(len(queue_urls), 2)
 
 
+class TestEmbeddingStats(unittest.TestCase):
+    """Test EmbeddingStats class."""
+
+    def test_embedding_stats_initialization(self):
+        """EmbeddingStats should initialize with zero values."""
+        from rag_system.ingestion.indexer import EmbeddingStats
+
+        stats = EmbeddingStats()
+
+        self.assertEqual(stats.chunks_total, 0)
+        self.assertEqual(stats.chunks_embedded, 0)
+        self.assertEqual(stats.chunks_skipped, 0)
+        self.assertEqual(stats.chunks_failed, 0)
+        self.assertFalse(stats.rate_limit_hit)
+        self.assertFalse(stats.interrupted)
+        self.assertIsNone(stats.error_message)
+
+    def test_embedding_stats_to_dict(self):
+        """EmbeddingStats.to_dict should return all values."""
+        from rag_system.ingestion.indexer import EmbeddingStats
+
+        stats = EmbeddingStats()
+        stats.chunks_total = 100
+        stats.chunks_embedded = 80
+        stats.chunks_skipped = 10
+        stats.chunks_failed = 10
+        stats.rate_limit_hit = True
+        stats.interrupted = False
+        stats.error_message = 'Test error'
+
+        result = stats.to_dict()
+
+        self.assertEqual(result['chunks_total'], 100)
+        self.assertEqual(result['chunks_embedded'], 80)
+        self.assertEqual(result['chunks_skipped'], 10)
+        self.assertEqual(result['chunks_failed'], 10)
+        self.assertTrue(result['rate_limit_hit'])
+        self.assertFalse(result['interrupted'])
+        self.assertEqual(result['error_message'], 'Test error')
+
+
+class TestResumeEmbeddings(unittest.TestCase):
+    """Test resume_embeddings functionality."""
+
+    def setUp(self):
+        """Create temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page, insert_chunk
+        init_db(self.temp_path)
+
+        # Create a page with some chunks
+        conn = get_connection(self.temp_path)
+        self.page_id = insert_page(
+            conn, 'https://example.com/test', 'Test Page', '', 'Test content', 'abc123'
+        )
+        self.chunk_ids = []
+        for i in range(3):
+            chunk_id = insert_chunk(
+                conn, self.page_id, 'small', i, f'Chunk {i} content', f'Section {i}'
+            )
+            self.chunk_ids.append(chunk_id)
+        conn.close()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_resume_embeddings_without_vector_client(self):
+        """resume_embeddings should return error when no vector client."""
+        from rag_system.ingestion.indexer import Indexer
+
+        indexer = Indexer(self.temp_path)
+
+        result = indexer.resume_embeddings()
+
+        self.assertIn('error', result)
+        self.assertEqual(result['error'], 'No vector client configured')
+
+    def test_resume_embeddings_no_chunks_to_embed(self):
+        """resume_embeddings should return early when all chunks have embeddings."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, update_chunk_embedding
+
+        # Add embeddings to all chunks
+        conn = get_connection(self.temp_path)
+        for chunk_id in self.chunk_ids:
+            update_chunk_embedding(conn, chunk_id, [0.1, 0.2, 0.3])
+        conn.close()
+
+        mock_client = MagicMock()
+        indexer = Indexer(self.temp_path, vector_client=mock_client)
+
+        result = indexer.resume_embeddings()
+
+        self.assertEqual(result['chunks_total'], 0)
+        self.assertEqual(result['chunks_embedded'], 0)
+        self.assertTrue(result['completed'])
+        mock_client.get_embeddings_batch.assert_not_called()
+
+    def test_resume_embeddings_embeds_missing_chunks(self):
+        """resume_embeddings should embed chunks without embeddings."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, get_all_chunks_with_embeddings
+
+        mock_client = MagicMock()
+        mock_client.get_embeddings_batch.return_value = [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+
+        indexer = Indexer(self.temp_path, vector_client=mock_client)
+
+        result = indexer.resume_embeddings()
+
+        self.assertEqual(result['chunks_total'], 3)
+        self.assertEqual(result['chunks_embedded'], 3)
+        self.assertTrue(result['completed'])
+
+        # Verify embeddings were stored
+        conn = get_connection(self.temp_path)
+        chunks_with_embeddings = get_all_chunks_with_embeddings(conn)
+        conn.close()
+
+        self.assertEqual(len(chunks_with_embeddings), 3)
+
+    def test_resume_embeddings_filters_by_page_id(self):
+        """resume_embeddings should filter by page_id when specified."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, insert_page, insert_chunk
+
+        # Create another page with chunks
+        conn = get_connection(self.temp_path)
+        page2_id = insert_page(
+            conn, 'https://example.com/page2', 'Page 2', '', 'Content', 'def456'
+        )
+        insert_chunk(conn, page2_id, 'small', 0, 'Page 2 chunk', 'Section A')
+        conn.close()
+
+        mock_client = MagicMock()
+        mock_client.get_embeddings_batch.return_value = [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+
+        indexer = Indexer(self.temp_path, vector_client=mock_client)
+
+        # Only embed chunks from first page
+        result = indexer.resume_embeddings(page_id=self.page_id)
+
+        self.assertEqual(result['chunks_total'], 3)  # Only first page's chunks
+
+    def test_resume_embeddings_creates_job(self):
+        """resume_embeddings should create an embedding job for tracking."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.database import get_connection, list_embedding_jobs
+
+        mock_client = MagicMock()
+        mock_client.get_embeddings_batch.return_value = [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+
+        indexer = Indexer(self.temp_path, vector_client=mock_client)
+
+        result = indexer.resume_embeddings()
+
+        self.assertIn('job_id', result)
+
+        # Verify job was created
+        conn = get_connection(self.temp_path)
+        jobs = list_embedding_jobs(conn)
+        conn.close()
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]['status'], 'completed')
+
+
+class TestGenerateEmbeddingsWithRateLimit(unittest.TestCase):
+    """Test _generate_embeddings rate limit handling."""
+
+    def setUp(self):
+        """Create temporary database for testing."""
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix='.db')
+        os.close(self.temp_fd)
+        from rag_system.database import init_db, get_connection, insert_page, insert_chunk
+        init_db(self.temp_path)
+
+        conn = get_connection(self.temp_path)
+        self.page_id = insert_page(
+            conn, 'https://example.com/test', 'Test Page', '', 'Test content', 'abc123'
+        )
+        self.chunk_ids = []
+        for i in range(2):
+            chunk_id = insert_chunk(
+                conn, self.page_id, 'small', i, f'Chunk {i} content', f'Section {i}'
+            )
+            self.chunk_ids.append(chunk_id)
+        conn.close()
+
+    def tearDown(self):
+        """Remove temporary database."""
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_generate_embeddings_raises_rate_limit_error(self):
+        """_generate_embeddings should raise RateLimitError when STOP_ON_RATE_LIMIT=True."""
+        from rag_system.ingestion.indexer import Indexer
+        from rag_system.api_client import APIError, RateLimitError
+        from rag_system.database import get_connection
+
+        mock_client = MagicMock()
+        mock_client.get_embeddings_batch.side_effect = APIError(
+            "Rate limited", status_code=429
+        )
+
+        indexer = Indexer(self.temp_path, vector_client=mock_client)
+
+        conn = get_connection(self.temp_path)
+        chunks = [
+            {'content': 'Chunk 0 content', 'heading_path': 'Section 0'},
+            {'content': 'Chunk 1 content', 'heading_path': 'Section 1'}
+        ]
+
+        with patch('rag_system.ingestion.indexer.config') as mock_config:
+            mock_config.EMBEDDING_BATCH_SIZE = 100
+            mock_config.EMBEDDING_BATCH_DELAY = 0
+            mock_config.EMBEDDING_MAX_RETRIES = 2
+            mock_config.EMBEDDING_RETRY_DELAY = 0.01
+            mock_config.EMBEDDING_STOP_ON_RATE_LIMIT = True
+
+            with patch('time.sleep'):  # Skip delays
+                with self.assertRaises(RateLimitError):
+                    indexer._generate_embeddings(conn, chunks, self.chunk_ids, 'Test Page')
+
+        conn.close()
+
+    def test_generate_embeddings_returns_stats_on_success(self):
+        """_generate_embeddings should return EmbeddingStats on success."""
+        from rag_system.ingestion.indexer import Indexer, EmbeddingStats
+        from rag_system.database import get_connection
+
+        mock_client = MagicMock()
+        mock_client.get_embeddings_batch.return_value = [[0.1, 0.2], [0.3, 0.4]]
+
+        indexer = Indexer(self.temp_path, vector_client=mock_client)
+
+        conn = get_connection(self.temp_path)
+        chunks = [
+            {'content': 'Chunk 0 content', 'heading_path': 'Section 0'},
+            {'content': 'Chunk 1 content', 'heading_path': 'Section 1'}
+        ]
+
+        stats = indexer._generate_embeddings(conn, chunks, self.chunk_ids, 'Test Page')
+
+        self.assertIsInstance(stats, EmbeddingStats)
+        self.assertEqual(stats.chunks_total, 2)
+        self.assertEqual(stats.chunks_embedded, 2)
+        self.assertEqual(stats.chunks_failed, 0)
+        self.assertFalse(stats.rate_limit_hit)
+
+        conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()

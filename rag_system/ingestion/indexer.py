@@ -9,15 +9,18 @@ import os
 import time
 
 from rag_system import config
-from rag_system.api_client import APIError
+from rag_system.api_client import APIError, RateLimitError
 from rag_system.database import (
     get_connection, insert_page, get_page_by_url,
     insert_chunk, update_chunk_embedding,
     delete_chunks_by_page, delete_doc_terms_by_page, update_page_content,
     create_crawl_session, get_active_session_for_url, get_crawl_session,
     update_session_status, update_session_stats, acquire_session_lock,
-    add_urls_to_crawl_queue, get_crawl_queue_urls, clear_crawl_queue
+    add_urls_to_crawl_queue, get_crawl_queue_urls, clear_crawl_queue,
+    create_embedding_job, update_embedding_job_progress, update_embedding_job_status,
+    get_chunks_without_embeddings
 )
+from rag_system.shutdown import is_shutdown_requested
 from rag_system.ingestion.crawler import Crawler
 from rag_system.ingestion.parser import parse_html, extract_title
 from rag_system.ingestion.chunker import chunk_markdown
@@ -26,6 +29,39 @@ from rag_system.security import sanitize_html_content, validate_content_length
 from rag_system.utils import hash_content, get_logger
 
 logger = get_logger(__name__)
+
+
+class EmbeddingStats:
+    """Statistics tracker for embedding operations.
+
+    Tracks progress and outcomes during embedding generation, similar to CrawlStats.
+    """
+
+    def __init__(self):
+        """Initialize embedding statistics."""
+        self.chunks_total: int = 0
+        self.chunks_embedded: int = 0
+        self.chunks_skipped: int = 0
+        self.chunks_failed: int = 0
+        self.rate_limit_hit: bool = False
+        self.interrupted: bool = False
+        self.error_message: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert stats to dictionary.
+
+        Returns:
+            Dict with all statistics.
+        """
+        return {
+            'chunks_total': self.chunks_total,
+            'chunks_embedded': self.chunks_embedded,
+            'chunks_skipped': self.chunks_skipped,
+            'chunks_failed': self.chunks_failed,
+            'rate_limit_hit': self.rate_limit_hit,
+            'interrupted': self.interrupted,
+            'error_message': self.error_message
+        }
 
 
 def build_contextual_text(chunk: Dict[str, Any], page_title: Optional[str] = None) -> str:
@@ -186,68 +222,122 @@ class Indexer:
             conn.close()
 
     def _generate_embeddings(self, conn, chunks: List[Dict], chunk_ids: List[int],
-                              page_title: Optional[str] = None) -> None:
+                              page_title: Optional[str] = None) -> EmbeddingStats:
         """Generate and store embeddings for chunks with batching and rate limiting.
 
         Embeds each chunk with its contextual information (page title, heading path)
         to improve retrieval quality. Processes in batches with retry logic for
         rate limit errors.
 
+        Supports graceful interruption via KeyboardInterrupt or shutdown signals.
+        Progress is saved to allow resumption.
+
         Args:
             conn: Database connection.
             chunks: List of chunk dicts with 'content' and 'heading_path'.
             chunk_ids: List of chunk IDs in database.
             page_title: Optional page title for contextual embedding.
+
+        Returns:
+            EmbeddingStats with progress information.
+
+        Raises:
+            RateLimitError: If rate limit is hit and EMBEDDING_STOP_ON_RATE_LIMIT is True.
+            KeyboardInterrupt: If interrupted (progress is saved first).
         """
+        stats = EmbeddingStats()
+
         if not chunks:
-            return
+            return stats
 
         batch_size = config.EMBEDDING_BATCH_SIZE
         batch_delay = config.EMBEDDING_BATCH_DELAY
         max_retries = config.EMBEDDING_MAX_RETRIES
-        total = len(chunks)
-        embedded_count = 0
+        retry_delay = config.EMBEDDING_RETRY_DELAY
+        stop_on_rate_limit = config.EMBEDDING_STOP_ON_RATE_LIMIT
 
-        # Process chunks in batches
-        for i in range(0, total, batch_size):
-            batch_chunks = chunks[i:i + batch_size]
-            batch_ids = chunk_ids[i:i + batch_size]
-            texts = [self._build_contextual_text(c, page_title) for c in batch_chunks]
+        stats.chunks_total = len(chunks)
 
-            # Retry with exponential backoff on rate limit errors
-            for attempt in range(max_retries):
-                try:
-                    embeddings = self.vector_client.get_embeddings_batch(texts)
-                    for chunk_id, embedding in zip(batch_ids, embeddings):
-                        update_chunk_embedding(conn, chunk_id, embedding)
-                    embedded_count += len(embeddings)
+        try:
+            # Process chunks in batches
+            for i in range(0, stats.chunks_total, batch_size):
+                # Check for shutdown request between batches
+                if is_shutdown_requested():
+                    logger.info("Shutdown requested, saving embedding progress...")
+                    stats.interrupted = True
                     break
 
-                except APIError as e:
-                    is_rate_limit = e.status_code == 429
-                    can_retry = attempt < max_retries - 1
+                batch_chunks = chunks[i:i + batch_size]
+                batch_ids = chunk_ids[i:i + batch_size]
+                texts = [self._build_contextual_text(c, page_title) for c in batch_chunks]
 
-                    if is_rate_limit and can_retry:
-                        delay = 2 ** attempt
-                        logger.warning(f"Rate limited, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
-                        time.sleep(delay)
-                    else:
-                        logger.warning(f"Failed to embed batch starting at {i}: {e}")
+                batch_success = False
+                # Retry with exponential backoff on rate limit errors
+                for attempt in range(max_retries):
+                    try:
+                        embeddings = self.vector_client.get_embeddings_batch(texts)
+                        for chunk_id, embedding in zip(batch_ids, embeddings):
+                            update_chunk_embedding(conn, chunk_id, embedding)
+                        stats.chunks_embedded += len(embeddings)
+                        batch_success = True
                         break
 
-                except Exception as e:
-                    logger.warning(f"Failed to embed batch starting at {i}: {e}")
-                    break
+                    except APIError as e:
+                        is_rate_limit = e.status_code == 429
+                        can_retry = attempt < max_retries - 1
 
-            # Progress logging for large jobs
-            if total > batch_size:
-                logger.info(f"Embedded {embedded_count}/{total} chunks")
+                        if is_rate_limit:
+                            stats.rate_limit_hit = True
+                            # Extract retry_after if available
+                            retry_after = retry_delay * (2 ** attempt)
 
-            # Rate limit delay between batches
-            if i + batch_size < total and batch_delay > 0:
-                time.sleep(batch_delay)
+                            if stop_on_rate_limit and not can_retry:
+                                # Raise RateLimitError to stop embedding
+                                stats.error_message = f"Rate limit exceeded after {max_retries} retries"
+                                raise RateLimitError(
+                                    message=stats.error_message,
+                                    retry_after=retry_after,
+                                    status_code=429
+                                )
 
-        logger.info(f"Generated {embedded_count} embeddings")
+                            if can_retry:
+                                logger.warning(f"Rate limited, retrying in {retry_after:.1f}s (attempt {attempt + 1}/{max_retries})")
+                                time.sleep(retry_after)
+                            else:
+                                logger.warning(f"Failed to embed batch starting at {i} after {max_retries} retries: {e}")
+                                stats.chunks_failed += len(batch_ids)
+                                break
+                        else:
+                            if can_retry:
+                                delay = retry_delay * (2 ** attempt)
+                                logger.warning(f"API error, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries}): {e}")
+                                time.sleep(delay)
+                            else:
+                                logger.warning(f"Failed to embed batch starting at {i}: {e}")
+                                stats.chunks_failed += len(batch_ids)
+                                break
+
+                    except Exception as e:
+                        logger.warning(f"Failed to embed batch starting at {i}: {e}")
+                        stats.chunks_failed += len(batch_ids)
+                        break
+
+                # Progress logging for large jobs
+                if stats.chunks_total > batch_size:
+                    logger.info(f"Embedded {stats.chunks_embedded}/{stats.chunks_total} chunks")
+
+                # Rate limit delay between batches
+                if i + batch_size < stats.chunks_total and batch_delay > 0:
+                    time.sleep(batch_delay)
+
+        except KeyboardInterrupt:
+            # Save progress before re-raising
+            logger.info("Embedding interrupted, progress saved")
+            stats.interrupted = True
+            raise
+
+        logger.info(f"Generated {stats.chunks_embedded} embeddings")
+        return stats
 
     def _build_contextual_text(self, chunk: Dict[str, Any],
                                page_title: Optional[str] = None) -> str:
@@ -441,6 +531,113 @@ class Indexer:
                 'session_id': session_id,
                 'resumed': resuming
             }
+
+        finally:
+            conn.close()
+
+    def resume_embeddings(self, page_id: Optional[int] = None,
+                           batch_size: Optional[int] = None) -> Dict[str, Any]:
+        """Resume embedding generation for chunks that don't have embeddings.
+
+        Queries chunks with embedding_json IS NULL and generates embeddings
+        for them. Supports interruption and can be resumed again if stopped.
+
+        Args:
+            page_id: Optional page ID to filter chunks. If None, processes all
+                     chunks without embeddings.
+            batch_size: Number of chunks to embed per API call.
+
+        Returns:
+            Dict with statistics about the resume operation.
+
+        Raises:
+            RateLimitError: If rate limit is hit and EMBEDDING_STOP_ON_RATE_LIMIT is True.
+        """
+        if not self.vector_client:
+            logger.warning("No vector client configured, cannot generate embeddings")
+            return {'error': 'No vector client configured'}
+
+        batch_size = batch_size or config.EMBEDDING_BATCH_SIZE
+        conn = get_connection(self.db_path)
+
+        try:
+            # Find chunks without embeddings
+            chunks_to_embed = get_chunks_without_embeddings(conn, page_id)
+            total = len(chunks_to_embed)
+
+            if total == 0:
+                logger.info("No chunks found without embeddings")
+                return {
+                    'chunks_total': 0,
+                    'chunks_embedded': 0,
+                    'chunks_skipped': 0,
+                    'chunks_failed': 0,
+                    'completed': True
+                }
+
+            logger.info(f"Found {total} chunks without embeddings")
+
+            # Create embedding job for tracking
+            job_id = create_embedding_job(conn, page_id, total)
+            logger.info(f"Created embedding job {job_id}")
+
+            # Build chunk dicts and ids for _generate_embeddings
+            chunks = []
+            chunk_ids = []
+            page_titles = {}
+
+            for row in chunks_to_embed:
+                chunks.append({
+                    'content': row['content'],
+                    'heading_path': row['heading_path']
+                })
+                chunk_ids.append(row['id'])
+                # Cache page titles
+                if row['title'] not in page_titles:
+                    page_titles[row['id']] = row['title']
+
+            # For simplicity, use the first page title (for contextual embedding)
+            # In a more sophisticated implementation, we'd group by page
+            first_title = chunks_to_embed[0]['title'] if chunks_to_embed else None
+
+            try:
+                stats = self._generate_embeddings(conn, chunks, chunk_ids, first_title)
+
+                # Update job progress
+                update_embedding_job_progress(
+                    conn, job_id,
+                    chunks_embedded=stats.chunks_embedded,
+                    chunks_skipped=stats.chunks_skipped,
+                    chunks_failed=stats.chunks_failed
+                )
+
+                if stats.interrupted:
+                    update_embedding_job_status(conn, job_id, 'interrupted')
+                elif stats.chunks_failed > 0:
+                    update_embedding_job_status(
+                        conn, job_id, 'completed',
+                        error_message=f"{stats.chunks_failed} chunks failed"
+                    )
+                else:
+                    update_embedding_job_status(conn, job_id, 'completed')
+
+                result = stats.to_dict()
+                result['job_id'] = job_id
+                result['completed'] = not stats.interrupted
+                return result
+
+            except RateLimitError as e:
+                # Update job status with rate limit error
+                update_embedding_job_status(
+                    conn, job_id, 'interrupted',
+                    error_message=str(e)
+                )
+                raise
+
+            except KeyboardInterrupt:
+                # Update job status on interrupt
+                update_embedding_job_status(conn, job_id, 'interrupted')
+                raise
 
         finally:
             conn.close()

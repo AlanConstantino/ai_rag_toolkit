@@ -44,7 +44,8 @@ from rag_system.database import (
 )
 from rag_system.api_client import (
     VectorAPIClient, ChatAPIClient,
-    create_openai_vector_client, create_openai_chat_client
+    create_openai_vector_client, create_openai_chat_client,
+    RateLimitError
 )
 from rag_system.security import (
     validate_query_length_or_raise, ValidationError,
@@ -229,6 +230,20 @@ def create_parser() -> argparse.ArgumentParser:
     sessions_parser.add_argument(
         '--json', action='store_true',
         help='Output as JSON'
+    )
+
+    # Resume embeddings command
+    resume_parser = subparsers.add_parser(
+        'resume-embeddings',
+        help='Resume embedding generation for chunks without embeddings'
+    )
+    resume_parser.add_argument(
+        '--page-id', type=int,
+        help='Only embed chunks for a specific page ID'
+    )
+    resume_parser.add_argument(
+        '--batch-size', type=int, default=config.EMBEDDING_BATCH_SIZE,
+        help='Number of chunks to embed per API call'
     )
 
     return parser
@@ -1059,6 +1074,61 @@ def main() -> None:
                             print(f"{s['id']:<6} {s['status']:<12} {s['start_url'][:50]:<50} {s['pages_crawled']:<8} {started}")
             finally:
                 conn.close()
+
+        elif args.command == 'resume-embeddings':
+            if not rag.vector_client:
+                print("Error: No vector client configured.")
+                print("Set OPENAI_API_KEY or configure RAG_VECTOR_API_ENDPOINT")
+                import sys
+                sys.exit(1)
+
+            from rag_system.ingestion.indexer import Indexer
+
+            indexer = Indexer(
+                rag.db_path,
+                vector_client=rag.vector_client,
+                chat_client=rag.chat_client
+            )
+
+            page_id = getattr(args, 'page_id', None)
+            batch_size = getattr(args, 'batch_size', config.EMBEDDING_BATCH_SIZE)
+
+            if page_id:
+                print(f"Resuming embedding generation for page {page_id}...")
+            else:
+                print("Resuming embedding generation for all chunks without embeddings...")
+
+            try:
+                result = indexer.resume_embeddings(
+                    page_id=page_id,
+                    batch_size=batch_size
+                )
+
+                if result.get('error'):
+                    print(f"Error: {result['error']}")
+                else:
+                    print(f"\nEmbedding Resume Results:")
+                    print(f"  Total chunks: {result['chunks_total']}")
+                    print(f"  Embedded: {result['chunks_embedded']}")
+                    print(f"  Skipped: {result['chunks_skipped']}")
+                    print(f"  Failed: {result['chunks_failed']}")
+
+                    if result.get('rate_limit_hit'):
+                        print("\n  Note: Rate limit was hit during processing")
+
+                    if result.get('completed'):
+                        print("\n  Status: Completed")
+                    else:
+                        print("\n  Status: Interrupted - run again to continue")
+
+            except RateLimitError as e:
+                print(f"\nRate limit exceeded: {e}")
+                print("Progress has been saved. Run the command again to resume.")
+                import sys
+                sys.exit(1)
+            except KeyboardInterrupt:
+                print("\n\nEmbedding interrupted. Progress has been saved - run the same command to resume.")
+                logger.info("Embedding interrupted by user")
 
     except KeyboardInterrupt:
         print("\nShutdown requested")
