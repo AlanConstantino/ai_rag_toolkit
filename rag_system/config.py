@@ -181,6 +181,15 @@ PAGE_SUMMARIZATION_ENABLED: bool = os.environ.get(
 ).lower() in ('true', '1', 'yes')
 
 # =============================================================================
+# System Summary Settings
+# =============================================================================
+
+# Enable system and global summary generation (used by rebuild-summaries command)
+SYSTEM_SUMMARIES_ENABLED: bool = os.environ.get(
+    'RAG_SYSTEM_SUMMARIES_ENABLED', 'true'
+).lower() in ('true', '1', 'yes')
+
+# =============================================================================
 # Embedding Settings
 # =============================================================================
 

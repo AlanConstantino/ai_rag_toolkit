@@ -205,6 +205,16 @@ def create_parser() -> argparse.ArgumentParser:
         help='Output results as JSON'
     )
 
+    # Rebuild summaries command (system + global)
+    rebuild_summaries_parser = subparsers.add_parser(
+        'rebuild-summaries',
+        help='Rebuild system and global summaries (post-processing step)'
+    )
+    rebuild_summaries_parser.add_argument(
+        '--json', action='store_true',
+        help='Output results as JSON'
+    )
+
     # Stats command
     subparsers.add_parser('stats', help='Show system statistics')
 
@@ -1166,6 +1176,34 @@ def main() -> None:
                     print(f"Summaries generated: {stats['summaries_generated']}")
                     if stats['errors'] > 0:
                         print(f"Errors: {stats['errors']}")
+
+        elif args.command == 'rebuild-summaries':
+            if not rag.chat_client:
+                print("Error: No chat client configured.")
+                print("Set OPENAI_API_KEY or configure RAG_CHAT_API_ENDPOINT")
+                import sys
+                sys.exit(1)
+
+            from rag_system.summarization.summarizer import SummarizationPipeline
+            import json as json_module
+
+            print("Rebuilding system and global summaries...")
+            pipeline = SummarizationPipeline(args.db, rag.chat_client)
+            stats = pipeline.rebuild_all_summaries()
+
+            if args.json:
+                print(json_module.dumps(stats, indent=2))
+            else:
+                print("Summary Rebuild Results")
+                print("=" * 40)
+                print(f"Pages summarized: {stats['pages_summarized']}")
+                print(f"Systems created: {stats['systems_created']}")
+                print(f"Systems summarized: {stats['systems_summarized']}")
+                print(f"Global summary: {'Yes' if stats['global_summary_generated'] else 'No'}")
+                if stats['errors']:
+                    print(f"Errors: {len(stats['errors'])}")
+                    for error in stats['errors'][:5]:
+                        print(f"  - {error}")
 
         elif args.command == 'backfill':
             if not rag.vector_client:
