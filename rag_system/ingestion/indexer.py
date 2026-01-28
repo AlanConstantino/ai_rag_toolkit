@@ -12,7 +12,7 @@ from rag_system import config
 from rag_system.api_client import APIError, RateLimitError
 from rag_system.database import (
     get_connection, insert_page, get_page_by_url,
-    insert_chunk, update_chunk_embedding,
+    insert_chunk, update_chunk_embedding, update_page_summary,
     delete_chunks_by_page, delete_doc_terms_by_page, update_page_content,
     create_crawl_session, get_active_session_for_url, get_crawl_session,
     update_session_status, update_session_stats, acquire_session_lock,
@@ -802,6 +802,88 @@ class Indexer:
 
                 except Exception as e:
                     logger.warning(f"Entity extraction failed for page {page_id}: {e}")
+                    stats['errors'] += 1
+
+                # Progress logging
+                if stats['pages_processed'] % 10 == 0:
+                    logger.info(f"Progress: {stats['pages_processed']}/{total_pages} pages")
+
+            return stats
+
+        finally:
+            conn.close()
+
+    def summarize_pages(self, page_id: Optional[int] = None,
+                        force: bool = False) -> Dict[str, Any]:
+        """Generate summaries for pages as a post-processing step.
+
+        This is a standalone operation that runs after crawling is complete.
+        It generates summaries for pages and stores them in the database.
+
+        Args:
+            page_id: Optional specific page ID to process. If None, processes
+                     all pages that don't have summaries yet.
+            force: If True, regenerate summaries even for pages that have them.
+
+        Returns:
+            Dict with statistics about the summarization operation.
+        """
+        if not self.chat_client:
+            logger.warning("No chat client configured for summarization")
+            return {'error': 'No chat client configured'}
+
+        from rag_system.summarization.summarizer import PageSummarizer
+
+        stats = {
+            'pages_processed': 0,
+            'summaries_generated': 0,
+            'errors': 0
+        }
+
+        conn = get_connection(self.db_path)
+        try:
+            # Get pages to process
+            if page_id:
+                cursor = conn.execute(
+                    "SELECT id, parsed_text FROM pages WHERE id = ?",
+                    (page_id,)
+                )
+            elif force:
+                cursor = conn.execute("SELECT id, parsed_text FROM pages")
+            else:
+                # Get pages without summaries
+                cursor = conn.execute(
+                    "SELECT id, parsed_text FROM pages WHERE summary IS NULL OR summary = ''"
+                )
+
+            pages = cursor.fetchall()
+            total_pages = len(pages)
+
+            if total_pages == 0:
+                logger.info("No pages found needing summarization")
+                return stats
+
+            logger.info(f"Summarizing {total_pages} pages...")
+            summarizer = PageSummarizer(self.chat_client)
+
+            for page in pages:
+                page_id = page['id']
+                text = page['parsed_text'] or ''
+
+                if not text.strip():
+                    continue
+
+                try:
+                    summary = summarizer.summarize(text)
+                    if summary:
+                        update_page_summary(conn, page_id, summary)
+                        stats['summaries_generated'] += 1
+
+                    stats['pages_processed'] += 1
+                    logger.debug(f"Generated summary for page {page_id}")
+
+                except Exception as e:
+                    logger.warning(f"Summarization failed for page {page_id}: {e}")
                     stats['errors'] += 1
 
                 # Progress logging
