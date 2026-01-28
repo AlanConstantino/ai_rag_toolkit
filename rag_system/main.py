@@ -216,6 +216,10 @@ def create_parser() -> argparse.ArgumentParser:
         '--batch-size', type=int, default=config.EMBEDDING_BATCH_SIZE,
         help='Number of chunks to embed per API call'
     )
+    backfill_parser.add_argument(
+        '--force', action='store_true',
+        help='Regenerate all embeddings, even for chunks that already have them'
+    )
 
     # Crawl sessions command
     sessions_parser = subparsers.add_parser(
@@ -697,13 +701,14 @@ def run_interactive(rag: RAGSystem) -> None:
 
 
 def backfill_embeddings(db_path: str, vector_client: Any,
-                         batch_size: int = 100) -> Dict[str, int]:
+                         batch_size: int = 100, force: bool = False) -> Dict[str, int]:
     """Generate embeddings for chunks that don't have them.
 
     Args:
         db_path: Path to SQLite database.
         vector_client: Vector API client for embeddings.
         batch_size: Number of chunks to embed per API call.
+        force: If True, regenerate embeddings for all chunks, not just missing ones.
 
     Returns:
         Dict with statistics about the backfill operation.
@@ -715,22 +720,33 @@ def backfill_embeddings(db_path: str, vector_client: Any,
 
     conn = get_connection(db_path)
     try:
-        # Find chunks without embeddings
-        cursor = conn.execute("""
-            SELECT c.id, c.content, c.heading_path, p.title
-            FROM chunks c
-            JOIN pages p ON c.page_id = p.id
-            WHERE c.embedding_json IS NULL
-            ORDER BY c.id
-        """)
+        # Find chunks to embed (all chunks if force, otherwise only missing)
+        if force:
+            cursor = conn.execute("""
+                SELECT c.id, c.content, c.heading_path, p.title
+                FROM chunks c
+                JOIN pages p ON c.page_id = p.id
+                ORDER BY c.id
+            """)
+        else:
+            cursor = conn.execute("""
+                SELECT c.id, c.content, c.heading_path, p.title
+                FROM chunks c
+                JOIN pages p ON c.page_id = p.id
+                WHERE c.embedding_json IS NULL
+                ORDER BY c.id
+            """)
         chunks_to_embed = cursor.fetchall()
 
         total = len(chunks_to_embed)
         if total == 0:
-            print("All chunks already have embeddings!")
+            print("No chunks found to embed.")
             return {'total': 0, 'embedded': 0, 'errors': 0}
 
-        print(f"Found {total} chunks without embeddings")
+        if force:
+            print(f"Regenerating embeddings for {total} chunks (force mode)")
+        else:
+            print(f"Found {total} chunks without embeddings")
 
         embedded = 0
         errors = 0
@@ -1020,7 +1036,8 @@ def main() -> None:
             backfill_embeddings(
                 rag.db_path,
                 rag.vector_client,
-                batch_size=args.batch_size
+                batch_size=args.batch_size,
+                force=args.force
             )
 
         elif args.command == 'crawl-sessions':
